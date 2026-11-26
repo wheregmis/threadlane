@@ -125,18 +125,8 @@ pub(crate) fn private_details(
 ) -> Vec<String> {
     let lower = text.to_ascii_lowercase();
     let mut found = Vec::new();
-    for marker in [
-        "/users/",
-        "/home/",
-        ":\\users\\",
-        "/private/var/",
-        "/var/folders/",
-        ".threadlane",
-    ] {
-        if lower.contains(marker) {
-            found.push("a local path".to_owned());
-            break;
-        }
+    if local_path(&lower) {
+        found.push("a local path".to_owned());
     }
     if words(text).any(threadlane_id) {
         found.push("a Threadlane task or decision id".to_owned());
@@ -151,8 +141,9 @@ pub(crate) fn private_details(
         let mut names = vec![repository.name.clone()];
         if let Some(slug) = &slug {
             names.push(slug.clone());
-            if let Some((owner, _)) = slug.split_once('/') {
+            if let Some((owner, name)) = slug.split_once('/') {
                 names.push(owner.to_owned());
+                names.push(name.to_owned());
             }
         }
         if lower.contains(&repository.remote_url.to_ascii_lowercase())
@@ -166,23 +157,122 @@ pub(crate) fn private_details(
     found
 }
 
-/// Whether the text carries something that looks like a credential.
+/// Whether the lowercased text names a path on a local machine: a home or
+/// macOS temporary directory, the Threadlane data directory, or a Windows drive
+/// path with either slash.
+fn local_path(lower: &str) -> bool {
+    const MARKERS: [&str; 7] = [
+        "/users/",
+        "\\users\\",
+        "/home/",
+        "/root/",
+        "/private/var/",
+        "/var/folders/",
+        ".threadlane",
+    ];
+    MARKERS.iter().any(|marker| lower.contains(marker))
+        || lower.match_indices(':').any(|(at, _)| {
+            // `c:/` or `c:\`, with no letter or digit before the drive letter,
+            // so `https://` is not a drive.
+            let mut before = lower[..at].chars().rev();
+            let drive = before.next().is_some_and(|c| c.is_ascii_alphabetic());
+            let alone = !before.next().is_some_and(char::is_alphanumeric);
+            let slash = matches!(lower[at + 1..].chars().next(), Some('/' | '\\'));
+            drive && alone && slash
+        })
+}
+
+/// Whether the text carries something that looks like a credential: a key
+/// block, a token with a known prefix, a secret assigned to a key such as
+/// `password=` or `api_key:`, or a long mixed-case alphanumeric string.
 pub(crate) fn credential(text: &str) -> bool {
     text.contains("PRIVATE KEY")
-        || words(text).any(|word| {
-            [
-                "ghp_",
-                "gho_",
-                "ghs_",
-                "ghu_",
-                "github_pat_",
-                "sk-",
-                "xox",
-                "AKIA",
-            ]
-            .iter()
-            .any(|prefix| word.starts_with(prefix) && word.len() >= prefix.len() + 16)
-        })
+        || words(text).any(|word| prefixed_token(word) || opaque_token(word))
+        || assigned_secret(text)
+}
+
+/// A token whose prefix names its issuer, with enough characters after it.
+fn prefixed_token(word: &str) -> bool {
+    [
+        "ghp_",
+        "gho_",
+        "ghs_",
+        "ghu_",
+        "ghr_",
+        "github_pat_",
+        "glpat-",
+        "sk-",
+        "sk_live_",
+        "rk_live_",
+        "pk_live_",
+        "xox",
+        "AKIA",
+        "ASIA",
+        "AIza",
+        "npm_",
+        "pypi-",
+        "hf_",
+        "eyJ",
+    ]
+    .iter()
+    .any(|prefix| word.starts_with(prefix) && word.len() >= prefix.len() + 16)
+}
+
+/// A string of at least 32 characters with upper- and lowercase letters and
+/// digits, as random keys are. Hex digests, which are one case, pass.
+fn opaque_token(word: &str) -> bool {
+    word.len() >= 32
+        && word.chars().any(|c| c.is_ascii_uppercase())
+        && word.chars().any(|c| c.is_ascii_lowercase())
+        && word.chars().any(|c| c.is_ascii_digit())
+}
+
+/// A secret-named key followed by `=` or `:` and a value of at least 8
+/// characters with letters and digits, such as `password=hunter2s3cret`.
+/// Placeholders like `<token>` or `$TOKEN` have no digit and pass.
+fn assigned_secret(text: &str) -> bool {
+    const KEYS: [&str; 12] = [
+        "password",
+        "passwd",
+        "pwd",
+        "secret",
+        "token",
+        "api_key",
+        "apikey",
+        "api-key",
+        "access_key",
+        "auth",
+        "credential",
+        "key",
+    ];
+    let lower = text.to_ascii_lowercase();
+    lower.match_indices(['=', ':']).any(|(at, _)| {
+        let key = lower[..at]
+            .trim_end_matches([' ', '"', '\''])
+            .rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+            .next()
+            .unwrap_or("");
+        let named = KEYS.iter().any(|name| {
+            key == *name || key.ends_with(&format!("_{name}")) || key.ends_with(&format!("-{name}"))
+        });
+        let rest = text[at + 1..].trim_start_matches([' ', '"', '\'']);
+        let (value, after) = rest.split_at(
+            rest.find(|c: char| {
+                !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '/' | '='))
+            })
+            .unwrap_or(rest.len()),
+        );
+        // A call, a field or a `::` after the value means code, not a secret.
+        let ends = after
+            .chars()
+            .next()
+            .is_none_or(|c| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ';'));
+        named
+            && ends
+            && value.len() >= 8
+            && value.chars().any(|c| c.is_ascii_alphabetic())
+            && value.chars().any(|c| c.is_ascii_digit())
+    })
 }
 
 /// Words of letters, digits, `_` and `-`.
@@ -198,10 +288,11 @@ fn threadlane_id(word: &str) -> bool {
     })
 }
 
-/// Whether `needle`, of at least 3 characters, occurs in `haystack` with no
-/// letter or digit on either side.
+/// Whether `needle` occurs in `haystack` with no letter or digit on either
+/// side. Short names count too: a project called `ai` matches "the ai crate"
+/// but not "maintain".
 fn has_word(haystack: &str, needle: &str) -> bool {
-    if needle.chars().count() < 3 {
+    if needle.is_empty() {
         return false;
     }
     haystack.match_indices(needle).any(|(at, _)| {
@@ -256,7 +347,7 @@ pub(crate) async fn proposal(
     );
     if !found.is_empty() && !filing.include_project_details {
         return Err(ToolError::Blocked(format!(
-            "the issue would be public in {}, and its text names {}. Rewrite it without them \
+            "the issue may be public in {}, and its text names {}. Rewrite it without them \
              and call again; set include_project_details only if the user asked to share them.",
             filing.upstream,
             found.join(", ")
@@ -272,7 +363,8 @@ pub(crate) async fn proposal(
     };
     Ok(Proposal {
         question: format!(
-            "Open issue “{}” in {}? It is public, outside this project.",
+            "Open issue “{}” in {}? It is outside this project, and its visibility is not \
+             checked: treat it as public.",
             filing.title, filing.upstream
         ),
         context: format!(
@@ -372,9 +464,78 @@ mod tests {
     }
 
     #[test]
+    fn the_bare_repository_name_of_a_registered_slug_is_found() {
+        // Registered under a name unlike its GitHub slug (#780 review).
+        let registered = [repository(
+            "client",
+            "https://github.com/private-co/saffron-engine",
+        )];
+        assert_eq!(
+            private_details("saffron-engine panics on start", None, &registered),
+            ["the registered repository \"client\""]
+        );
+        assert!(private_details("saffron panics on start", None, &registered).is_empty());
+    }
+
+    #[test]
+    fn short_names_are_matched_as_whole_words() {
+        let registered = [repository("ui", "https://github.com/acme/ui")];
+        let check = |text: &str| private_details(text, Some("AI"), &registered);
+        assert_eq!(check("The AI build breaks"), ["the project name \"AI\""]);
+        assert_eq!(check("the ui crate"), ["the registered repository \"ui\""]);
+        // Inside another word, a short name is not the name.
+        assert!(check("maintain the build, quietly").is_empty());
+        assert!(has_word("x", "x"));
+        assert!(!has_word("ab", ""));
+    }
+
+    #[test]
+    fn local_paths_of_every_platform_are_found() {
+        for text in [
+            "repro: cat /root/app/.env",
+            "at C:/Users/me/app/main.rs",
+            "at C:\\Users\\me\\app",
+            "built in D:\\work\\app",
+            "in d:/src/app",
+            "under /home/me",
+            "in /private/var/folders/x",
+            "~/.threadlane/hub",
+        ] {
+            assert_eq!(private_details(text, None, &[]), ["a local path"], "{text}");
+        }
+        for text in [
+            "see https://example.com/a/b",
+            "the error: /etc/hosts is unreadable",
+            "use a::b/c",
+        ] {
+            assert!(private_details(text, None, &[]).is_empty(), "{text}");
+        }
+    }
+
+    #[test]
     fn credentials_are_found() {
         assert!(credential("token ghp_abcdefghijklmnopqrstuvwxyz"));
         assert!(credential("-----BEGIN OPENSSH PRIVATE KEY-----"));
+        assert!(credential("glpat-abcdefghijklmnopqrst"));
+        assert!(credential("key AIzaSyAbcdefghijklmnopqrstu"));
+        assert!(credential(
+            "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6"
+        ));
+        assert!(credential("export STRIPE=sk_live_abcdefghijklmnopqr"));
+        assert!(credential("password=hunter2s3cret"));
+        assert!(credential("DB_PASSWORD: \"hunter2s3cret\""));
+        assert!(credential("api_key = 'a1b2c3d4e5f6'"));
+        assert!(credential("fails with key: hunter2s3cret at start"));
+        assert!(credential("x Q7vLm2Xp9RtZ4kWn8YbC3dFh6JsA1eGu"));
         assert!(!credential("the sk-learn crate and ghp_ prefixes"));
+        // Placeholders, code and digests are not secrets.
+        assert!(!credential("password=<your password>"));
+        assert!(!credential("set token: $GITHUB_TOKEN"));
+        assert!(!credential("let token = parse_token2(input);"));
+        assert!(!credential("token: Token2Kind::Ident"));
+        assert!(!credential(
+            "at commit 0ca4304d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b"
+        ));
+        assert!(!credential("monkey: banana12345"));
     }
 }

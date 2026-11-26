@@ -67,6 +67,15 @@ async fn the_user_approves_each_filing_in_every_mode() {
             "{}",
             decision.question
         );
+        // Visibility is not checked, so the card does not claim it (#780 review).
+        assert!(
+            decision
+                .question
+                .contains("its visibility is not checked: treat it as public"),
+            "{}",
+            decision.question
+        );
+        assert!(!decision.question.contains("It is public"));
         assert!(decision.context.contains("Calling read_buf"));
         assert!(w.backend.questions().is_empty(), "{mode}");
         assert!(w.forge.calls().is_empty(), "{mode}");
