@@ -169,6 +169,9 @@ pub struct HubTools {
     clock: Arc<dyn Clock>,
     waker: Arc<dyn Waker>,
     reviewer: Option<String>,
+    /// Held while a finished task reopens, so worktree cleanup, which holds
+    /// it too, cannot remove a checkout the task is about to run in.
+    removal: Arc<tokio::sync::Mutex<()>>,
     /// [`crate::HubSettings::default_models`], for what the lead is told.
     default_models: HashMap<BackendKind, String>,
 }
@@ -187,8 +190,16 @@ impl HubTools {
             clock,
             waker,
             reviewer,
+            removal: Arc::default(),
             default_models: HashMap::new(),
         }
+    }
+
+    /// The same tools, sharing the hub's worktree cleanup lock.
+    #[must_use]
+    pub(crate) fn with_removal_lock(mut self, lock: Arc<tokio::sync::Mutex<()>>) -> Self {
+        self.removal = lock;
+        self
     }
 
     /// The same tools, telling the lead each backend's default model.
@@ -497,6 +508,7 @@ impl HubTools {
         } else {
             None
         };
+        let _removal = self.removal.lock().await;
         let updated = self
             .db
             .update_task(

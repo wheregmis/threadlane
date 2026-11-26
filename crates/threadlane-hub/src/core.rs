@@ -97,6 +97,7 @@ impl HubCore {
     ) -> Result<Self, HubError> {
         ensure_defaults(&db).await?;
         let wake = Arc::new(WakeHub::default());
+        let project_removal: Arc<tokio::sync::Mutex<()>> = Arc::default();
         let tools: Arc<dyn ToolRegistry> = Arc::new(
             HubTools::new(
                 db.clone(),
@@ -104,7 +105,8 @@ impl HubCore {
                 Arc::clone(&wake) as Arc<dyn Waker>,
                 settings.reviewer.clone(),
             )
-            .with_default_models(settings.default_models.clone()),
+            .with_default_models(settings.default_models.clone())
+            .with_removal_lock(Arc::clone(&project_removal)),
         );
         let started_at = clock.now();
         let core = Self {
@@ -123,7 +125,7 @@ impl HubCore {
                 github_poll: Arc::default(),
                 workspaces: None,
                 workspace_files: None,
-                project_removal: Arc::default(),
+                project_removal,
                 kept_worktrees: Arc::default(),
                 last_pruned: Arc::default(),
                 pull_status: Arc::default(),

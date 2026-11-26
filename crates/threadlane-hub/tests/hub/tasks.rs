@@ -2477,6 +2477,30 @@ async fn a_lead_wake_reopens_a_finished_task_in_its_own_session() {
     assert_eq!(done.result.unwrap()["summary"], "Corrected total");
     // The lead hears of the second ending as well as the first.
     assert_eq!(task_results(&hub).await.len(), reported + 1);
+
+    // The same call replayed after that ending leaves the new result alone.
+    let (lead, run) = begin(&*hub.link).await;
+    assert_eq!(run.lane_kind, LaneKind::Lead);
+    let replayed = call(
+        &hub,
+        &lead,
+        &run,
+        "reopen",
+        UPDATE_TASK,
+        json!({"task_id": "T-0001", "wake": instruction}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(replayed["status"], "done");
+    let kept = task(&hub, "T-0001").await;
+    assert_eq!(kept.result.unwrap()["summary"], "Corrected total");
+    assert!(
+        hub.db
+            .pending_events(kept.lane_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

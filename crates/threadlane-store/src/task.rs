@@ -392,6 +392,21 @@ pub(crate) async fn complete_result(
     end_task(conn, task, TaskStatus::Done, None, now).await
 }
 
+/// Whether the call keyed `call_key` already queued task `id` again, so that
+/// repeating it changes nothing.
+async fn retried_by(conn: &Connection, id: TaskId, call_key: &str) -> StoreResult<bool> {
+    let earlier: Vec<Json> = query_all(
+        conn,
+        "SELECT payload FROM events WHERE source = ?1 AND source_event_id LIKE ?2",
+        params![TASK_SOURCE, format!("retry:{}:%", id.get())],
+        |row| Cols(row).json(0),
+    )
+    .await?;
+    Ok(earlier
+        .iter()
+        .any(|payload| payload["call_key"] == call_key))
+}
+
 /// How many times the user retried task `id`.
 async fn retries(conn: &Connection, id: TaskId) -> StoreResult<i64> {
     query_one(
@@ -502,17 +517,7 @@ async fn retry_in(
     let task = existing_task(conn, id).await?;
     if let Some(lead) = &lead {
         check_run_lease(conn, Some(lead.lease), task.project_id).await?;
-        let earlier: Vec<Json> = query_all(
-            conn,
-            "SELECT payload FROM events WHERE source = ?1 AND source_event_id LIKE ?2",
-            params![TASK_SOURCE, format!("retry:{}:%", id.get())],
-            |row| Cols(row).json(0),
-        )
-        .await?;
-        if earlier
-            .iter()
-            .any(|payload| payload["call_key"] == lead.call_key)
-        {
+        if retried_by(conn, id, lead.call_key).await? {
             return Ok(task);
         }
     }
@@ -1515,6 +1520,13 @@ impl TaskStore for HubDb {
                 "task {id} is {}; it can no longer change",
                 task.status
             )));
+        }
+        // The same call, repeated after the task finished again, reopens nothing.
+        if reopen
+            && let Some(wake) = &update.wake
+            && retried_by(conn, id, &wake.call_key).await?
+        {
+            return Ok(task);
         }
         for repository in update.repositories {
             if task.repositories.contains(repository) {
