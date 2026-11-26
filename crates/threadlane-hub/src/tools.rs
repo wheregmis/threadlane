@@ -1393,7 +1393,7 @@ fn task_definitions() -> Vec<ToolDefinition> {
         ),
         define(
             UPDATE_TASK,
-            "Edit an unfinished task, attach registered repositories, or wake it with an instruction.",
+            "Edit an unfinished task, attach registered repositories, or wake it with an instruction. Waking a finished task reopens it on its own branch and session.",
             Tier::Local,
             json!({
                 "type": "object",
@@ -1409,7 +1409,7 @@ fn task_definitions() -> Vec<ToolDefinition> {
                     },
                     "wake": {
                         "type": "string",
-                        "description": "Instruction to queue in this task's lane. Wakes a sleeping task without answering pending decisions or resuming a user-stopped lane."
+                        "description": "Instruction to queue in this task's lane. Wakes a sleeping task without answering pending decisions or resuming a user-stopped lane. Reopens a finished task; a failed or cancelled one stays ended."
                     }
                 },
                 "required": ["task_id"],

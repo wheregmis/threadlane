@@ -2402,6 +2402,84 @@ async fn a_lead_wake_survives_the_active_implementation_finishing() {
 }
 
 #[tokio::test]
+async fn a_lead_wake_reopens_a_finished_task_in_its_own_session() {
+    let (hub, lead, run) = lead_run(2).await;
+    call(
+        &hub,
+        &lead,
+        &run,
+        "create",
+        CREATE_TASK,
+        task_args("page", &[]),
+    )
+    .await
+    .unwrap();
+    finish_run(&hub, &lead, &run).await;
+
+    let (lease, first) = begin(&*hub.link).await;
+    write_progress(&hub, &lease, &first, "T-0001").await;
+    call(
+        &hub,
+        &lease,
+        &first,
+        "first-result",
+        FINISH_TASK,
+        json!({"summary": "Original total"}),
+    )
+    .await
+    .unwrap();
+    finish_run(&hub, &lease, &first).await;
+    assert_eq!(task(&hub, "T-0001").await.status, TaskStatus::Done);
+    let reported = task_results(&hub).await.len();
+
+    let (lead, run) = begin(&*hub.link).await;
+    assert_eq!(run.lane_kind, LaneKind::Lead);
+    let instruction = "The pull request's review found a wrong total.";
+    for _ in 0..2 {
+        let reopened = call(
+            &hub,
+            &lead,
+            &run,
+            "reopen",
+            UPDATE_TASK,
+            json!({"task_id": "T-0001", "wake": instruction}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reopened["status"], "queued");
+    }
+    finish_run(&hub, &lead, &run).await;
+    let queued = task(&hub, "T-0001").await;
+    assert!(queued.result.is_none());
+    // The reopening notice and the instruction, each once.
+    assert_eq!(
+        hub.db.pending_events(queued.lane_id).await.unwrap().len(),
+        2
+    );
+
+    let (lease, resumed) = begin(&*hub.link).await;
+    assert_eq!(resumed.session_id, first.session_id);
+    assert!(resumed.prompt.contains(instruction));
+    assert!(resumed.prompt.contains("reopened T-0001"));
+    call(
+        &hub,
+        &lease,
+        &resumed,
+        "final-result",
+        FINISH_TASK,
+        json!({"summary": "Corrected total"}),
+    )
+    .await
+    .unwrap();
+    finish_run(&hub, &lease, &resumed).await;
+    let done = task(&hub, "T-0001").await;
+    assert_eq!(done.status, TaskStatus::Done);
+    assert_eq!(done.result.unwrap()["summary"], "Corrected total");
+    // The lead hears of the second ending as well as the first.
+    assert_eq!(task_results(&hub).await.len(), reported + 1);
+}
+
+#[tokio::test]
 async fn an_attachment_during_review_applies_to_the_next_implementation_run() {
     let (hub, lead, run) = lead_run(2).await;
     let general = hub.general().await;

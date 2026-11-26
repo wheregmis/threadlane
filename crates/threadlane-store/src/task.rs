@@ -1507,7 +1507,10 @@ impl TaskStore for HubDb {
         let conn = tx.conn();
         let mut task = existing_task(conn, id).await?;
         check_run_lease(conn, lease, task.project_id).await?;
-        if task.status.is_terminal() {
+        // A finished task's pull request still collects reviews, so a wake
+        // reopens it: the agent that did the work fixes what they find.
+        let reopen = task.status == TaskStatus::Done && update.wake.is_some();
+        if task.status.is_terminal() && !reopen {
             return Err(StoreError::Conflict(format!(
                 "task {id} is {}; it can no longer change",
                 task.status
@@ -1545,6 +1548,43 @@ impl TaskStore for HubDb {
             ],
         )
         .await?;
+        if let Some(wake) = &update.wake
+            && reopen
+        {
+            exec(
+                conn,
+                "UPDATE tasks SET status = ?1, waiting_reason = NULL, result = NULL WHERE id = ?2",
+                params![TaskStatus::Queued.as_str(), id.get()],
+            )
+            .await?;
+            // Counted as a retry, so the lead hears how this attempt ends too.
+            let attempt = retries(conn, id).await? + 1;
+            insert_event_in(
+                conn,
+                &NewEvent {
+                    project_id: task.project_id,
+                    lane_id: task.lane_id,
+                    source: TASK_SOURCE.to_owned(),
+                    source_event_id: format!("retry:{}:{attempt}", id.get()),
+                    kind: EventKind::System,
+                    payload: json!({
+                        "text": format!(
+                            "The project lead reopened {id} after it finished. Your earlier \
+                             work is committed on the task branch. Continue from it; do not \
+                             start over. Finish the task again when the new work is done."
+                        ),
+                        "call_key": wake.call_key,
+                    }),
+                    trust: Trust::System,
+                    requested: task.origin.is_requested() || wake.requested,
+                    session_ref: None,
+                    decision_ref: None,
+                    reply_to_ref: None,
+                    received_at: wake.at,
+                },
+            )
+            .await?;
+        }
         if let Some(wake) = update.wake {
             insert_event_in(
                 conn,
