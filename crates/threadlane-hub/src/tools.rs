@@ -170,6 +170,9 @@ pub struct HubTools {
     clock: Arc<dyn Clock>,
     waker: Arc<dyn Waker>,
     reviewer: Option<String>,
+    /// Held while a finished task reopens, so worktree cleanup, which holds
+    /// it too, cannot remove a checkout the task is about to run in.
+    removal: Arc<tokio::sync::Mutex<()>>,
     /// [`crate::HubSettings::default_models`], for what the lead is told.
     default_models: HashMap<BackendKind, String>,
 }
@@ -188,8 +191,16 @@ impl HubTools {
             clock,
             waker,
             reviewer,
+            removal: Arc::default(),
             default_models: HashMap::new(),
         }
+    }
+
+    /// The same tools, sharing the hub's worktree cleanup lock.
+    #[must_use]
+    pub(crate) fn with_removal_lock(mut self, lock: Arc<tokio::sync::Mutex<()>>) -> Self {
+        self.removal = lock;
+        self
     }
 
     /// The same tools, telling the lead each backend's default model.
@@ -498,6 +509,7 @@ impl HubTools {
         } else {
             None
         };
+        let _removal = self.removal.lock().await;
         let updated = self
             .db
             .update_task(
@@ -1418,7 +1430,7 @@ fn task_definitions() -> Vec<ToolDefinition> {
         ),
         define(
             UPDATE_TASK,
-            "Edit an unfinished task, attach registered repositories, or wake it with an instruction.",
+            "Edit an unfinished task, attach registered repositories, or wake it with an instruction. Waking a finished task reopens it on its own branch and session.",
             Tier::Local,
             json!({
                 "type": "object",
@@ -1434,7 +1446,7 @@ fn task_definitions() -> Vec<ToolDefinition> {
                     },
                     "wake": {
                         "type": "string",
-                        "description": "Instruction to queue in this task's lane. Wakes a sleeping task without answering pending decisions or resuming a user-stopped lane."
+                        "description": "Instruction to queue in this task's lane. Wakes a sleeping task without answering pending decisions or resuming a user-stopped lane. Reopens a finished task; a failed or cancelled one stays ended."
                     }
                 },
                 "required": ["task_id"],
