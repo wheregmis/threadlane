@@ -618,7 +618,8 @@ impl HubCore {
             // Earlier results in this pass may share the same cursor key.
             let since = inner.db.source_cursor(&key).await?;
             for item in &items {
-                if since.as_deref() > Some(item.at.as_str()) || (ended && !needs_attention(item)) {
+                let old = since.as_deref() > Some(item.at.as_str());
+                if (old && !crate::gh::passed_check(item)) || (ended && !needs_attention(item)) {
                     continue;
                 }
                 inserted += self
