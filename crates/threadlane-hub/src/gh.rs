@@ -264,7 +264,7 @@ impl GithubSource for GhSource {
             .get_items(
                 &format!("repos/{repository}/commits/{reference}/check-runs?per_page=100"),
                 target,
-                parse_check_runs,
+                settled_check_runs,
             )
             .await?;
         if let Some(number) = target.number {
@@ -865,6 +865,27 @@ fn notification(value: &Json) -> Option<GithubItem> {
     })
 }
 
+/// [`parse_check_runs`] for a task's own work. While another check of the
+/// head is still running, the ones that passed are held back: one passed
+/// check decides nothing, and each would wake the task's agent to no end.
+/// They arrive together once the last check finishes; a failure is not held.
+pub(crate) fn settled_check_runs(answer: &Json, target: &PullTarget) -> Vec<GithubItem> {
+    let runs = answer.get("check_runs").and_then(Json::as_array);
+    let running = runs
+        .into_iter()
+        .flatten()
+        .any(|run| run["status"] != "completed");
+    let mut items = parse_check_runs(answer, target);
+    if running {
+        items.retain(|item| {
+            !["success", "skipped", "neutral"]
+                .iter()
+                .any(|conclusion| item.title.ends_with(&format!(": {conclusion}")))
+        });
+    }
+    items
+}
+
 /// The finished check runs of a `check-runs` answer.
 pub(crate) fn parse_check_runs(answer: &Json, target: &PullTarget) -> Vec<GithubItem> {
     let runs = answer.get("check_runs").and_then(Json::as_array);
@@ -1046,7 +1067,13 @@ mod tests {
 
     #[test]
     fn finished_check_runs_become_check_results() {
-        let items = parse_check_runs(&serde_json::from_str(CHECK_RUNS).unwrap(), &target());
+        let answer: Json = serde_json::from_str(CHECK_RUNS).unwrap();
+        assert_eq!(
+            settled_check_runs(&answer, &target()).len(),
+            1,
+            "for a task, the passed check waits for the run in progress"
+        );
+        let items = parse_check_runs(&answer, &target());
         assert_eq!(items.len(), 2, "the run in progress is left out");
         let failed = &items[0];
         assert_eq!(failed.id, "check_run:31000000001");
@@ -1062,6 +1089,17 @@ mod tests {
         assert_eq!(failed.at, "2026-11-17T08:30:40Z");
         assert_eq!(items[1].title, "lint: success");
         assert_eq!(items[1].body, "");
+
+        // Once nothing is running, the passed check reaches the task too.
+        let mut answer = answer;
+        for run in answer["check_runs"].as_array_mut().unwrap() {
+            if run["status"] != "completed" {
+                run["status"] = "completed".into();
+                run["conclusion"] = "success".into();
+                run["completed_at"] = "2026-11-17T08:40:00Z".into();
+            }
+        }
+        assert_eq!(settled_check_runs(&answer, &target()).len(), 3);
     }
 
     #[test]
