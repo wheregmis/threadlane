@@ -69,7 +69,8 @@ pub(super) fn prepare_clipboard_images(
 const IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
 
 /// The image file a paste names, when the whole pasted text is one absolute
-/// path (optionally quoted or a `file://` URL) to a readable image file.
+/// path (optionally quoted or a `file://` URL) with an image extension. This
+/// only parses; [`read_pasted_image`] checks the file off the UI thread.
 pub(super) fn pasted_image_path(text: &str) -> Option<PathBuf> {
     let text = text.trim();
     if text.contains(['\n', '\r']) {
@@ -79,20 +80,38 @@ pub(super) fn pasted_image_path(text: &str) -> Option<PathBuf> {
         .into_iter()
         .find_map(|quote| text.strip_prefix(quote)?.strip_suffix(quote))
         .unwrap_or(text);
-    let path = PathBuf::from(match text.strip_prefix("file://") {
-        Some(url) => percent_decode(url.strip_prefix("localhost").unwrap_or(url))?,
-        None => text.to_owned(),
-    });
+    let path = match text.strip_prefix("file://") {
+        Some(url) => native_path(percent_decode(
+            url.strip_prefix("localhost").unwrap_or(url),
+        )?)?,
+        None => PathBuf::from(text),
+    };
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-    (path.is_absolute()
-        && IMAGE_EXTENSIONS.contains(&extension.as_str())
-        && File::open(&path)
-            .and_then(|file| file.metadata())
-            .is_ok_and(|meta| meta.is_file()))
-    .then_some(path)
+    (path.is_absolute() && IMAGE_EXTENSIONS.contains(&extension.as_str())).then_some(path)
 }
 
-fn percent_decode(text: &str) -> Option<String> {
+/// Reads the image a pasted path names, refusing anything but a regular file
+/// before opening it so a FIFO or device cannot block the read.
+pub(super) fn read_pasted_image(path: PathBuf) -> Result<Vec<ImageAttachment>, String> {
+    let meta = std::fs::metadata(&path).map_err(|error| error.to_string())?;
+    if !meta.is_file() {
+        return Err(format!("{} is not a regular file.", path.display()));
+    }
+    read_images(vec![path])
+}
+
+#[cfg(unix)]
+fn native_path(bytes: Vec<u8>) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt as _;
+    Some(std::ffi::OsString::from_vec(bytes).into())
+}
+
+#[cfg(not(unix))]
+fn native_path(bytes: Vec<u8>) -> Option<PathBuf> {
+    String::from_utf8(bytes).ok().map(PathBuf::from)
+}
+
+fn percent_decode(text: &str) -> Option<Vec<u8>> {
     let mut bytes = Vec::new();
     let mut rest = text.as_bytes();
     while let Some((&byte, tail)) = rest.split_first() {
@@ -105,7 +124,7 @@ fn percent_decode(text: &str) -> Option<String> {
             rest = tail;
         }
     }
-    String::from_utf8(bytes).ok()
+    Some(bytes)
 }
 
 pub(super) fn read_images(paths: Vec<PathBuf>) -> Result<Vec<ImageAttachment>, String> {
@@ -283,7 +302,11 @@ mod tests {
     use gpui_kit::{Image, ImageFormat};
     use threadlane_core::attachment::MAX_IMAGE_BYTES;
 
-    use super::{copy_clipboard_images, pasted_image_path, prepare_clipboard_images, read_images};
+    use threadlane_desktop::{AppState, Destination, HeldPaste};
+
+    use super::{
+        copy_clipboard_images, pasted_image_path, prepare_clipboard_images, read_pasted_image,
+    };
 
     fn clipboard_image(
         pixels: &image::DynamicImage,
@@ -350,16 +373,25 @@ mod tests {
         }
     }
 
-    #[test]
-    fn pasted_text_naming_an_image_file_resolves_to_its_path() {
-        let dir = std::env::temp_dir().join(format!("threadlane-paste-{}", std::process::id()));
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("threadlane-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("Screenshot 2026-11-26 at 09.17.27.PNG");
+        dir
+    }
+
+    fn png() -> Vec<u8> {
         let mut png = Cursor::new(Vec::new());
         image::DynamicImage::ImageRgb8(image::RgbImage::new(2, 2))
             .write_to(&mut png, image::ImageFormat::Png)
             .unwrap();
-        std::fs::write(&path, png.into_inner()).unwrap();
+        png.into_inner()
+    }
+
+    #[test]
+    fn pasted_text_naming_an_image_file_resolves_to_its_path() {
+        let dir = temp_dir("paste");
+        let path = dir.join("Screenshot 2026-11-26 at 09.17.27.PNG");
+        std::fs::write(&path, png()).unwrap();
         let text = path.to_str().unwrap();
         let url = format!("file://{}", text.replace(' ', "%20"));
         for pasted in [
@@ -372,14 +404,11 @@ mod tests {
         ] {
             assert_eq!(pasted_image_path(&pasted), Some(path.clone()), "{pasted:?}");
         }
-        let images = read_images(vec![pasted_image_path(&url).unwrap()]).unwrap();
+        let images = read_pasted_image(pasted_image_path(&url).unwrap()).unwrap();
         assert_eq!(images[0].name(), "Screenshot 2026-11-26 at 09.17.27.PNG");
 
-        let text_file = dir.join("notes.txt");
-        std::fs::write(&text_file, "hi").unwrap();
         for pasted in [
-            dir.join("missing.png").to_str().unwrap().to_owned(),
-            text_file.to_str().unwrap().to_owned(),
+            dir.join("notes.txt").to_str().unwrap().to_owned(),
             format!("look at {text}"),
             format!("{text}\n{text}"),
             "Screenshot.png".to_owned(),
@@ -387,11 +416,92 @@ mod tests {
         ] {
             assert_eq!(pasted_image_path(&pasted), None, "{pasted:?}");
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pasted_image_reads_refuse_missing_special_and_non_image_files() {
+        let dir = temp_dir("paste-read");
+        let text = dir.join("notes.png");
+        std::fs::write(&text, "not an image").unwrap();
         std::fs::create_dir_all(dir.join("folder.png")).unwrap();
-        assert_eq!(
-            pasted_image_path(dir.join("folder.png").to_str().unwrap()),
-            None
+        let fifo = dir.join("pipe.png");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
         );
+        // A FIFO without a writer would block an open; this must return.
+        for path in [dir.join("missing.png"), text, dir.join("folder.png"), fifo] {
+            assert!(read_pasted_image(path.clone()).is_err(), "{path:?}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_urls_decode_to_native_filename_bytes() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let path = pasted_image_path("file:///tmp/shot%FF%20a.png").unwrap();
+        assert_eq!(path.as_os_str().as_bytes(), b"/tmp/shot\xFF a.png");
+    }
+
+    // macOS filesystems refuse non-UTF-8 names, so only Linux can create one.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn file_urls_resolve_existing_non_utf8_filenames() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let dir = temp_dir("paste-bytes");
+        let path = dir.join(std::ffi::OsStr::from_bytes(b"shot\xFF.png"));
+        std::fs::write(&path, png()).unwrap();
+        let url = format!("file://{}/shot%FF.png", dir.to_str().unwrap());
+        let resolved = pasted_image_path(&url).unwrap();
+        assert_eq!(resolved, path);
+        assert_eq!(read_pasted_image(resolved).unwrap().len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_path_paste_pastes_its_text_where_it_was_pasted() {
+        let dir = temp_dir("paste-composer");
+        let target = Destination::Lead("work".into(), "General".into());
+        let mut state = AppState::default();
+        state.edit_draft(&target, "see  please");
+        let missing = dir.join("gone.png");
+        let text = format!("'{}'", missing.display());
+        let paste = |selection| HeldPaste {
+            text: text.clone(),
+            draft: "see  please".into(),
+            selection,
+        };
+
+        state.loading_images(&target);
+        let read = read_pasted_image(pasted_image_path(&text).unwrap());
+        assert_eq!(
+            state.finish_path_paste(&target, read, paste(4..4)),
+            Some(4 + text.len())
+        );
+        assert_eq!(state.draft(&target), format!("see {text} please"));
+        assert!(state.draft_images(&target).is_empty());
+        assert!(!state.is_loading_images(&target));
+
+        // An edit made while the file was read moves the paste to the end.
+        state.edit_draft(&target, "edited");
+        state.loading_images(&target);
+        let read = read_pasted_image(missing.clone());
+        let cursor = state.finish_path_paste(&target, read, paste(4..4));
+        assert_eq!(state.draft(&target), format!("edited{text}"));
+        assert_eq!(cursor, Some(state.draft(&target).len()));
+
+        std::fs::write(&missing, png()).unwrap();
+        state.loading_images(&target);
+        let read = read_pasted_image(missing);
+        assert_eq!(state.finish_path_paste(&target, read, paste(0..0)), None);
+        assert_eq!(state.draft(&target), format!("edited{text}"));
+        assert_eq!(state.draft_images(&target)[0].name(), "gone.png");
+        assert!(!state.is_loading_images(&target));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

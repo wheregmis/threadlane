@@ -14,9 +14,9 @@ use gpui_kit::*;
 use threadlane_core::memory::parse_skill_mentions;
 use threadlane_core::time::{Clock as _, SystemClock};
 use threadlane_desktop::{
-    Activity, AppState, Destination, Draft, MentionItem, MentionKind, MentionQuery, Outgoing,
-    complete_mention, load_modes, mention_at, remove_skill_mention, sends_on_enter, step_selection,
-    toggle_skill_mention,
+    Activity, AppState, Destination, Draft, HeldPaste, MentionItem, MentionKind, MentionQuery,
+    Outgoing, complete_mention, load_modes, mention_at, remove_skill_mention, sends_on_enter,
+    step_selection, toggle_skill_mention,
 };
 
 use super::{button, chat_images, icon_button, meta, status_dot};
@@ -677,9 +677,9 @@ impl Desktop {
                 textarea
                     .disabled(destination.is_none())
                     .aria_label(label)
-                    .on_paste(move |item, _, cx| {
+                    .on_paste(move |item, window, cx| {
                         paste_to.as_ref().is_some_and(|target| {
-                            view.update(cx, |this, cx| this.paste_images(target, item, cx))
+                            view.update(cx, |this, cx| this.paste_images(target, item, window, cx))
                                 .unwrap_or(false)
                         })
                     }),
@@ -781,6 +781,7 @@ impl Desktop {
         &mut self,
         target: &Destination,
         item: &ClipboardItem,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         let images: Vec<_> = item
@@ -791,32 +792,23 @@ impl Desktop {
                 _ => None,
             })
             .collect();
-        // Only a pasted path is consumed; clipboard images keep any text alongside them.
-        let from_path = images.is_empty();
-        let checked = if from_path {
-            let Some(path) = item
-                .text()
-                .as_deref()
-                .and_then(chat_images::pasted_image_path)
-            else {
+        if images.is_empty() {
+            return self.paste_image_path(target, item, window, cx);
+        }
+        // Clipboard images keep any text alongside them.
+        self.state.loading_images(target);
+        let images = match chat_images::copy_clipboard_images(&images) {
+            Ok(images) => images,
+            Err(error) => {
+                self.state.attach_images(target, Err(error));
+                cx.notify();
                 return false;
-            };
-            self.state.loading_images(target);
-            cx.background_spawn(async move { chat_images::read_images(vec![path]) })
-        } else {
-            self.state.loading_images(target);
-            let images = match chat_images::copy_clipboard_images(&images) {
-                Ok(images) => images,
-                Err(error) => {
-                    self.state.attach_images(target, Err(error));
-                    cx.notify();
-                    return false;
-                }
-            };
-            cx.background_spawn(async move { chat_images::prepare_clipboard_images(images) })
+            }
         };
         let target = target.clone();
         cx.notify();
+        let checked =
+            cx.background_spawn(async move { chat_images::prepare_clipboard_images(images) });
         cx.spawn(async move |this, cx| {
             let images = checked.await;
             let _ = this.update(cx, |this, cx| {
@@ -825,7 +817,50 @@ impl Desktop {
             });
         })
         .detach();
-        from_path
+        false
+    }
+
+    /// Holds back a paste naming an image file while a worker reads it, then
+    /// attaches the image or pastes the held text where it would have gone.
+    fn paste_image_path(
+        &mut self,
+        target: &Destination,
+        item: &ClipboardItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(text) = item.text() else {
+            return false;
+        };
+        let Some(path) = chat_images::pasted_image_path(&text) else {
+            return false;
+        };
+        let input = self.draft_input(target.draft()).read(cx);
+        let paste = HeldPaste {
+            text,
+            draft: input.value().to_string(),
+            selection: input.selected_range(),
+        };
+        self.state.loading_images(target);
+        let target = target.clone();
+        cx.notify();
+        let read = cx.background_spawn(async move { chat_images::read_pasted_image(path) });
+        cx.spawn_in(window, async move |this, cx| {
+            let images = read.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if let Some(cursor) = this.state.finish_path_paste(&target, images, paste) {
+                    this.sync_drafts(window, cx);
+                    if this.composer_shown.as_ref() == Some(&target) {
+                        this.draft_input(target.draft()).update(cx, |input, cx| {
+                            input.set_selected_range(cursor..cursor, cx);
+                        });
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        true
     }
 
     pub(crate) fn submit_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
