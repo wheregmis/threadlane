@@ -40,6 +40,7 @@ mod templates;
 mod timers;
 mod tools;
 mod updater;
+mod upstream;
 mod wake;
 
 use std::fs::{File, OpenOptions};

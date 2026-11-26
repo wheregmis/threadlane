@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use serde_json::{Value as Json, json};
-use threadlane_core::forge::{REPORT_LIMITATION, RepositoryAction};
+use threadlane_core::forge::{FILE_UPSTREAM_ISSUE, REPORT_LIMITATION, RepositoryAction};
 use threadlane_core::ids::{DecisionId, RunId, StandingRuleId};
 use threadlane_core::link::{FINISH_TASK, LinkError, Perform};
 use threadlane_core::memory::progress_path;
@@ -134,6 +134,12 @@ impl LocalLink {
             .await?;
         let mut asked = match verdict {
             Verdict::Block { reason } => return Err(ToolError::Blocked(reason)),
+            // The user approves each filing outside the project (#779): no
+            // standing rule, default or review answers it.
+            _ if tool == FILE_UPSTREAM_ISSUE => Some(Asked::You {
+                offers_rule: false,
+                proposal: false,
+            }),
             _ if tool == REPORT_LIMITATION && arguments["require_approval"] == true => {
                 Some(Asked::You {
                     offers_rule: false,
@@ -609,6 +615,29 @@ impl LocalLink {
                 question: format!("Open issue “{title}” in wheregmis/threadlane?"),
                 context: body,
             }
+        } else if tool == FILE_UPSTREAM_ISSUE {
+            let proposal = crate::upstream::proposal(&inner.db, lane, arguments).await?;
+            let filing = crate::upstream::parse(arguments)?;
+            let existing = inner.db.lane_decisions(lane.id).await.map_err(tool_error)?;
+            // The same issue is filed, or declined, once; a failed filing asks again.
+            if existing.iter().any(|d| {
+                d.tool == tool
+                    && crate::upstream::parse(&d.arguments).is_ok_and(|prior| {
+                        prior.upstream.eq_ignore_ascii_case(&filing.upstream)
+                            && prior.title.eq_ignore_ascii_case(&filing.title)
+                    })
+                    && !d
+                        .outcome
+                        .as_ref()
+                        .is_some_and(|outcome| outcome["performed"] == false)
+            }) {
+                return Err(ToolError::Blocked(format!(
+                    "An issue titled “{}” in {} was already asked about in this lane; see its \
+                     decision before filing it again.",
+                    filing.title, filing.upstream
+                )));
+            }
+            proposal
         } else {
             let mut args = arguments.clone();
             if matches!(asked, Asked::Dream)
@@ -833,8 +862,24 @@ impl LocalLink {
                 | crate::REQUEST_REVIEW
                 | threadlane_core::forge::CREATE_TAG
                 | REPORT_LIMITATION
+                | FILE_UPSTREAM_ISSUE
         ) {
-            let (remote, action) = if decision.tool == REPORT_LIMITATION {
+            let (remote, action) = if decision.tool == FILE_UPSTREAM_ISSUE {
+                if lane.kind != LaneKind::Task {
+                    return Err(LinkError::Rejected(
+                        "repository actions require a task lane".into(),
+                    ));
+                }
+                let filing = crate::upstream::parse(&decision.arguments)
+                    .map_err(|e| LinkError::Rejected(e.to_string()))?;
+                (
+                    filing.remote(),
+                    RepositoryAction::CreateIssue {
+                        title: filing.title,
+                        body: filing.body,
+                    },
+                )
+            } else if decision.tool == REPORT_LIMITATION {
                 let (title, body) = dreaming::report_issue(&decision.arguments)
                     .map_err(|e| LinkError::Rejected(e.to_string()))?;
                 (
