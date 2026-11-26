@@ -7,6 +7,7 @@
 //! - [`fakes`]: in-memory implementations of the remaining interfaces.
 //! - [`git`]: local bare repositories for workspace tests.
 //! - [`conformance`]: the backend conformance suite every driver runs.
+//! - [`script`]: executable fake programs that are safe to spawn.
 //!
 //! Stores are faked by opening the real store on an in-memory database
 //! (`threadlane_store::HubDb::open_in_memory`).
@@ -17,6 +18,8 @@ pub mod conformance;
 mod crash;
 pub mod fakes;
 pub mod git;
+#[cfg(unix)]
+pub mod script;
 
 pub use crate::backend::{ReceivedRun, Script, ScriptStep, ScriptedBackend, SessionOutcome};
 pub use crate::clock::FakeClock;

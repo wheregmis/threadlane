@@ -1220,8 +1220,6 @@ mod tests {
     /// `gh` does on a 304 when `exit1` exists.
     #[cfg(unix)]
     fn fake_gh_with(dir: &std::path::Path, routes: &[(&str, &str, String)]) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
         let mut script = r#"#!/bin/sh
 dir=$(dirname "$0")
 printf '%s\n' "$*" >> "$dir/calls.log"
@@ -1235,8 +1233,7 @@ case "$last" in
         }
         script.push_str("  *) exit 2 ;;\nesac\nif [ -f \"$dir/exit1\" ]; then exit 1; fi\n");
         let program = dir.join("gh");
-        std::fs::write(&program, script).unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        threadlane_testkit::script::write_executable(&program, &script);
         program
     }
 

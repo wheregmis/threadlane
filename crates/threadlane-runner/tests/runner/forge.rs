@@ -4,7 +4,6 @@
 
 #![cfg(unix)]
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
@@ -14,23 +13,7 @@ use threadlane_core::model::Repository;
 use threadlane_core::workspace::{Workspaces, task_branch};
 use threadlane_runner::{GitForge, GitWorkspaces};
 use threadlane_testkit::git::{bare_repository, git};
-
-/// Writes an executable script that no test's child process can hold open
-/// for writing. A file this process wrote can leak its write descriptor into
-/// a child another test thread forks at that moment, and running it then
-/// fails with "Text file busy" (ETXTBSY) on Linux; `cp` writes the copy in
-/// its own process, so this process never opens it.
-fn write_script(path: &Path, script: &str) {
-    let draft = path.with_extension("draft");
-    std::fs::write(&draft, script).unwrap();
-    let copied = std::process::Command::new("cp")
-        .arg(&draft)
-        .arg(path)
-        .status()
-        .unwrap();
-    assert!(copied.success(), "cp {}", path.display());
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-}
+use threadlane_testkit::script::write_executable;
 
 const TASK: TaskId = TaskId(1);
 
@@ -191,7 +174,7 @@ impl FakeGh {
              fi\n"
         );
         let program = dir.path().join("gh");
-        write_script(&program, &script);
+        write_executable(&program, &script);
         Self { dir }
     }
 
@@ -383,7 +366,7 @@ fn gh_auth(code: u8) -> (TempDir, PathBuf) {
          exit {code}\n",
         dir.path().display()
     );
-    write_script(&program, &script);
+    write_executable(&program, &script);
     (dir, program)
 }
 
@@ -588,7 +571,7 @@ async fn a_branch_is_deleted_only_while_it_still_points_at_the_expected_head() {
     let remote = "https://github.test/acme/app.git";
     // Real `git`, with the forge's remote rewritten to the local bare repository.
     let fake_git = dir.path().join("git");
-    write_script(
+    write_executable(
         &fake_git,
         &format!(
             "#!/bin/sh\nexec git -c url.{}.insteadOf={remote} \"$@\"\n",
