@@ -139,12 +139,37 @@ impl GhSource {
     /// unread, for answers that must be complete, such as check state.
     async fn get_every_page(&self, path: &str) -> Result<Vec<Answer>, GithubError> {
         let pages = self.get_pages(&[], path).await?;
-        if pages.len() == MAX_PAGES && pages.last().is_some_and(|page| page.next.is_some()) {
+        if some_unread(&pages) {
             return Err(GithubError(format!(
                 "gh api {path} has more than {MAX_PAGES} pages; not all were read"
             )));
         }
         Ok(pages)
+    }
+
+    /// Every check run of a head, read from all its pages before deciding
+    /// what reaches the task (see [`settled_check_runs`]). Pages that
+    /// [`MAX_PAGES`] leaves unread may hold a check still running, so the
+    /// head is then not settled.
+    async fn check_results(
+        &self,
+        path: &str,
+        target: &PullTarget,
+    ) -> Result<Vec<GithubItem>, GithubError> {
+        let pages = self.get_pages(&[], path).await?;
+        let unread = some_unread(&pages);
+        let mut runs = Vec::new();
+        for page in pages {
+            if let Some(Json::Array(page)) = page.json(path)?.get_mut("check_runs").map(Json::take)
+            {
+                runs.extend(page);
+            }
+        }
+        Ok(settled_check_runs(
+            &serde_json::json!({ "check_runs": runs }),
+            target,
+            unread,
+        ))
     }
 
     async fn get_page(&self, extra: &[String], path: &str) -> Result<Answer, GithubError> {
@@ -261,10 +286,9 @@ impl GithubSource for GhSource {
         };
         let reference = encode(&reference);
         let mut items = self
-            .get_items(
+            .check_results(
                 &format!("repos/{repository}/commits/{reference}/check-runs?per_page=100"),
                 target,
-                settled_check_runs,
             )
             .await?;
         if let Some(number) = target.number {
@@ -865,23 +889,47 @@ fn notification(value: &Json) -> Option<GithubItem> {
     })
 }
 
-/// [`parse_check_runs`] for a task's own work. While another check of the
-/// head is still running, the ones that passed are held back: one passed
-/// check decides nothing, and each would wake the task's agent to no end.
-/// They arrive together once the last check finishes; a failure is not held.
-pub(crate) fn settled_check_runs(answer: &Json, target: &PullTarget) -> Vec<GithubItem> {
+/// Whether [`MAX_PAGES`] left pages of `pages` unread.
+fn some_unread(pages: &[Answer]) -> bool {
+    pages.len() == MAX_PAGES && pages.last().is_some_and(|page| page.next.is_some())
+}
+
+/// [`parse_check_runs`] for a task's own work, given every check run of the
+/// head (`unread` when some could not be read). While another check is still
+/// running, or may be, the ones that passed are held back: one passed check
+/// decides nothing, and each would wake the task's agent to no end. A
+/// failure is not held.
+///
+/// Once the last check finishes, the passed ones arrive together, each
+/// dated when the head settled, the latest finish of any of its checks.
+/// Their own finish could be older than the task's cursor by then, as a
+/// failure, review or comment delivered meanwhile moves it on, and the
+/// cursor would drop them; the settle time is at or after anything seen
+/// while they were held. A result already delivered keeps its id, so
+/// dating it again delivers nothing twice.
+pub(crate) fn settled_check_runs(
+    answer: &Json,
+    target: &PullTarget,
+    unread: bool,
+) -> Vec<GithubItem> {
     let runs = answer.get("check_runs").and_then(Json::as_array);
-    let running = runs
-        .into_iter()
-        .flatten()
-        .any(|run| run["status"] != "completed");
+    let running = unread
+        || runs
+            .into_iter()
+            .flatten()
+            .any(|run| run["status"] != "completed");
     let mut items = parse_check_runs(answer, target);
+    let passed = |item: &GithubItem| {
+        ["success", "skipped", "neutral"]
+            .iter()
+            .any(|conclusion| item.title.ends_with(&format!(": {conclusion}")))
+    };
     if running {
-        items.retain(|item| {
-            !["success", "skipped", "neutral"]
-                .iter()
-                .any(|conclusion| item.title.ends_with(&format!(": {conclusion}")))
-        });
+        items.retain(|item| !passed(item));
+    } else if let Some(settled) = items.iter().map(|item| item.at.clone()).max() {
+        for item in items.iter_mut().filter(|item| passed(item)) {
+            item.at.clone_from(&settled);
+        }
     }
     items
 }
@@ -1069,7 +1117,7 @@ mod tests {
     fn finished_check_runs_become_check_results() {
         let answer: Json = serde_json::from_str(CHECK_RUNS).unwrap();
         assert_eq!(
-            settled_check_runs(&answer, &target()).len(),
+            settled_check_runs(&answer, &target(), false).len(),
             1,
             "for a task, the passed check waits for the run in progress"
         );
@@ -1099,7 +1147,25 @@ mod tests {
                 run["completed_at"] = "2026-11-17T08:40:00Z".into();
             }
         }
-        assert_eq!(settled_check_runs(&answer, &target()).len(), 3);
+        let settled = settled_check_runs(&answer, &target(), false);
+        let dates: Vec<_> = settled
+            .iter()
+            .map(|item| (item.title.as_str(), item.at.as_str()))
+            .collect();
+        assert_eq!(
+            dates,
+            [
+                ("test: failure", "2026-11-17T08:30:40Z"),
+                ("lint: success", "2026-11-17T08:40:00Z"),
+                ("build (macos): success", "2026-11-17T08:40:00Z"),
+            ],
+            "passed checks are dated when the head settled; a failure keeps its own time"
+        );
+        assert_eq!(
+            settled_check_runs(&answer, &target(), true).len(),
+            1,
+            "with pages left unread, a check may still be running"
+        );
     }
 
     #[test]
@@ -1237,6 +1303,147 @@ case "$last" in
                  notifications?per_page=50&page=2",
             ],
             "the cursor goes with the first page only, and page 2 links nowhere next"
+        );
+    }
+
+    /// A check run named `name`, finished at `completed_at` with
+    /// `conclusion`, or still running without one.
+    fn check_run(id: u64, name: &str, finished: Option<(&str, &str)>) -> Json {
+        serde_json::json!({
+            "id": id,
+            "name": name,
+            "status": if finished.is_some() { "completed" } else { "in_progress" },
+            "conclusion": finished.map(|(conclusion, _)| conclusion),
+            "completed_at": finished.map(|(_, at)| at),
+            "html_url": format!("https://github.com/acme/widgets/actions/runs/1/job/{id}"),
+            "app": { "slug": "github-actions" },
+        })
+    }
+
+    /// A fake `gh` whose head has the check runs of `pages`, one page each,
+    /// and no reviews or comments.
+    #[cfg(unix)]
+    fn fake_gh_checks(dir: &std::path::Path, pages: &[Vec<Json>]) -> PathBuf {
+        let path = "repos/acme/widgets/commits/threadlane%2FT-0001/check-runs?per_page=100";
+        let mut routes = Vec::new();
+        for (index, runs) in pages.iter().enumerate().rev() {
+            let body = serde_json::json!({ "total_count": 0, "check_runs": runs }).to_string();
+            let page = index + 1;
+            let link = (page < pages.len()).then(|| {
+                format!(
+                    "Link: <https://api.github.com/{path}&page={}>; rel=\"next\"\n",
+                    page + 1
+                )
+            });
+            let answer = format!(
+                "HTTP/2.0 200 OK\nContent-Type: application/json\n{}\n{body}",
+                link.unwrap_or_default()
+            );
+            let pattern = if page == 1 {
+                "*check-runs?per_page=100".to_owned()
+            } else {
+                format!("*check-runs*page={page}")
+            };
+            routes.push((pattern, format!("check-runs-{page}.http"), answer));
+        }
+        routes.push(("*/reviews*".into(), "reviews.http".into(), ok("[]")));
+        routes.push(("*/comments*".into(), "comments.http".into(), ok("[]")));
+        let routes: Vec<_> = routes
+            .iter()
+            .map(|(pattern, file, answer)| (pattern.as_str(), file.as_str(), answer.clone()))
+            .collect();
+        fake_gh_with(dir, &routes)
+    }
+
+    fn check_titles(items: &[GithubItem]) -> Vec<(&str, &str)> {
+        items
+            .iter()
+            .filter(|item| item.kind == GithubKind::CheckResult)
+            .map(|item| (item.title.as_str(), item.at.as_str()))
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_check_running_on_a_later_page_holds_the_passed_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let passed = check_run(1, "lint", Some(("success", "2026-11-17T08:10:00Z")));
+        let source = GhSource::with_gh(fake_gh_checks(
+            dir.path(),
+            &[vec![passed.clone()], vec![check_run(2, "build", None)]],
+        ));
+        let items = source.pull_request(&target(), None).await.unwrap();
+        assert_eq!(check_titles(&items), [], "build, on page 2, still runs");
+        assert_eq!(calls(dir.path()).len(), 4, "both check pages were read");
+
+        let dir = tempfile::tempdir().unwrap();
+        let built = check_run(2, "build", Some(("success", "2026-11-17T08:20:00Z")));
+        let source = GhSource::with_gh(fake_gh_checks(dir.path(), &[vec![passed], vec![built]]));
+        let items = source.pull_request(&target(), None).await.unwrap();
+        assert_eq!(
+            check_titles(&items),
+            [
+                ("lint: success", "2026-11-17T08:20:00Z"),
+                ("build: success", "2026-11-17T08:20:00Z"),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn check_runs_beyond_the_page_limit_are_not_settled() {
+        let dir = tempfile::tempdir().unwrap();
+        let passed = check_run(1, "lint", Some(("success", "2026-11-17T08:10:00Z")));
+        let failed = check_run(2, "test", Some(("failure", "2026-11-17T08:11:00Z")));
+        let pages: Vec<_> = std::iter::once(vec![passed, failed])
+            .chain((1..=MAX_PAGES).map(|page| {
+                let at = format!("2026-11-17T09:{page:02}:00Z");
+                vec![check_run(10 + page as u64, "more", Some(("success", &at)))]
+            }))
+            .collect();
+        let source = GhSource::with_gh(fake_gh_checks(dir.path(), &pages));
+        let items = source.pull_request(&target(), None).await.unwrap();
+        assert_eq!(
+            check_titles(&items),
+            [("test: failure", "2026-11-17T08:11:00Z")],
+            "the last page went unread, so only the failure comes through"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_held_check_outlives_the_cursor_a_failure_moved_on() {
+        // A passes at t1 and B fails at t2 while C runs: B is delivered and
+        // the task's cursor moves to t2, past A.
+        let a = check_run(1, "a", Some(("success", "2026-11-17T08:01:00Z")));
+        let b = check_run(2, "b", Some(("failure", "2026-11-17T08:02:00Z")));
+        let dir = tempfile::tempdir().unwrap();
+        let source = GhSource::with_gh(fake_gh_checks(
+            dir.path(),
+            &[vec![a.clone(), b.clone(), check_run(3, "c", None)]],
+        ));
+        let first = source.pull_request(&target(), None).await.unwrap();
+        assert_eq!(
+            check_titles(&first),
+            [("b: failure", "2026-11-17T08:02:00Z")]
+        );
+        let cursor = first.iter().map(|item| item.at.clone()).max().unwrap();
+
+        // C passes at t3: A still reaches the task, with C.
+        let c = check_run(3, "c", Some(("success", "2026-11-17T08:03:00Z")));
+        let dir = tempfile::tempdir().unwrap();
+        let source = GhSource::with_gh(fake_gh_checks(dir.path(), &[vec![a, b, c]]));
+        let second = source.pull_request(&target(), Some(&cursor)).await.unwrap();
+        let ids: Vec<_> = second.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["check_run:2", "check_run:1", "check_run:3"],
+            "B again, which its id makes a duplicate, then A and C"
+        );
+        assert!(
+            second
+                .iter()
+                .all(|item| item.at.as_str() >= cursor.as_str())
         );
     }
 
