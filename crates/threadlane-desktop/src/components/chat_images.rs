@@ -1,13 +1,16 @@
 //! Attachment preparation and inline thumbnails for chat images.
 
 use std::{
+    cell::Cell,
     fs::File,
     io::{Cursor, Read as _},
     path::PathBuf,
+    rc::Rc,
     sync::Arc,
 };
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{InputEvent, TextareaState, Undo};
 use gpui_kit::component::{Selectable as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::*;
 use threadlane_core::attachment::{
@@ -98,6 +101,54 @@ pub(super) fn read_pasted_image(path: PathBuf) -> Result<Vec<ImageAttachment>, S
         return Err(format!("{} is not a regular file.", path.display()));
     }
     read_images(vec![path])
+}
+
+/// Finishes a paste of an image path that `input` has already pasted as
+/// ordinary text. When `read` yields the images, `attach` takes them and
+/// returns whether to take the paste back; that uses the input's own Undo, so
+/// every cursor, the replaced selection and earlier history come back as they
+/// were. A failed read, or any edit made meanwhile, leaves the text pasted and
+/// hands `attach` an error.
+pub(super) fn finish_path_paste(
+    input: Entity<TextareaState>,
+    read: Task<Result<Vec<ImageAttachment>, String>>,
+    attach: impl FnOnce(Result<Vec<ImageAttachment>, String>, &mut App) -> bool + 'static,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    // Deferred so watching for edits starts after the paste's own change.
+    window.defer(cx, move |window, cx| {
+        let pasted = input.read(cx).value();
+        let edited = Rc::new(Cell::new(false));
+        let watch = cx.subscribe(&input, {
+            let edited = edited.clone();
+            move |_, event: &InputEvent, _| {
+                if matches!(event, InputEvent::Change) {
+                    edited.set(true);
+                }
+            }
+        });
+        window
+            .spawn(cx, async move |cx| {
+                let images = read.await;
+                drop(watch);
+                let _ = cx.update(|window, cx| {
+                    let images = images.and_then(|images| {
+                        // `set_value` changes the text without a Change event.
+                        (!edited.get() && input.read(cx).value() == pasted)
+                            .then_some(images)
+                            .ok_or_else(|| "The draft changed while the image was read.".to_owned())
+                    });
+                    if attach(images, cx) {
+                        input
+                            .read(cx)
+                            .focus_handle(cx)
+                            .dispatch_action(&Undo, window, cx);
+                    }
+                });
+            })
+            .detach();
+    });
 }
 
 #[cfg(unix)]
@@ -302,8 +353,6 @@ mod tests {
     use gpui_kit::{Image, ImageFormat};
     use threadlane_core::attachment::MAX_IMAGE_BYTES;
 
-    use threadlane_desktop::{AppState, Destination, HeldPaste};
-
     use super::{
         copy_clipboard_images, pasted_image_path, prepare_clipboard_images, read_pasted_image,
     };
@@ -373,13 +422,13 @@ mod tests {
         }
     }
 
-    fn temp_dir(name: &str) -> std::path::PathBuf {
+    pub(super) fn temp_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("threadlane-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
 
-    fn png() -> Vec<u8> {
+    pub(super) fn png() -> Vec<u8> {
         let mut png = Cursor::new(Vec::new());
         image::DynamicImage::ImageRgb8(image::RgbImage::new(2, 2))
             .write_to(&mut png, image::ImageFormat::Png)
@@ -462,46 +511,228 @@ mod tests {
         assert_eq!(read_pasted_image(resolved).unwrap().len(), 1);
         std::fs::remove_dir_all(dir).unwrap();
     }
+}
 
-    #[test]
-    fn failed_path_paste_pastes_its_text_where_it_was_pasted() {
-        let dir = temp_dir("paste-composer");
-        let target = Destination::Lead("work".into(), "General".into());
-        let mut state = AppState::default();
-        state.edit_draft(&target, "see  please");
-        let missing = dir.join("gone.png");
-        let text = format!("'{}'", missing.display());
-        let paste = |selection| HeldPaste {
-            text: text.clone(),
-            draft: "see  please".into(),
-            selection,
+#[cfg(test)]
+mod paste_tests {
+    use std::{cell::RefCell, rc::Rc};
+
+    use gpui_kit::component::input::{Textarea, TextareaState};
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{
+        App, AppContext as _, Bounds, ClipboardItem, Context, Entity, IntoElement,
+        ParentElement as _, Point, Render, Styled as _, TestAppContext, Window, WindowBounds,
+        WindowHandle, WindowOptions, div, gpui, px, size,
+    };
+
+    use super::{finish_path_paste, pasted_image_path, read_pasted_image};
+
+    /// A textarea wired to pasted image paths the way the composer is.
+    struct Composer {
+        text: Entity<TextareaState>,
+        attached: Rc<RefCell<Vec<Result<usize, String>>>>,
+    }
+
+    impl Render for Composer {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let (input, attached) = (self.text.clone(), self.attached.clone());
+            div()
+                .size_full()
+                .child(Textarea::new(&self.text).on_paste(move |item, window, cx| {
+                    if let Some(path) = item.text().and_then(|text| pasted_image_path(&text)) {
+                        let read = cx.background_spawn(async move { read_pasted_image(path) });
+                        let attached = attached.clone();
+                        let attach = move |images: Result<Vec<_>, String>, _: &mut App| {
+                            let ok = images.is_ok();
+                            attached
+                                .borrow_mut()
+                                .push(images.map(|images| images.len()));
+                            ok
+                        };
+                        finish_path_paste(input.clone(), read, attach, window, cx);
+                    }
+                    false
+                }))
+        }
+    }
+
+    struct Fixture {
+        window: WindowHandle<gpui_kit::base::Root>,
+        text: Entity<TextareaState>,
+        attached: Rc<RefCell<Vec<Result<usize, String>>>>,
+        dir: std::path::PathBuf,
+    }
+
+    impl Fixture {
+        fn new(cx: &mut TestAppContext, name: &str, draft: &str) -> Self {
+            cx.update(gpui_kit::init);
+            let attached = Rc::<RefCell<Vec<_>>>::default();
+            let (window, view) = cx.update(|cx| {
+                let (window, view) = gpui_kit::open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(Bounds {
+                            origin: Point::default(),
+                            size: size(px(480.), px(480.)),
+                        })),
+                        ..Default::default()
+                    },
+                    cx,
+                    |window, cx| {
+                        let text = cx.new(|cx| {
+                            TextareaState::new(window, cx)
+                                .rows(4)
+                                .default_value(draft.to_owned())
+                        });
+                        let attached = attached.clone();
+                        cx.new(|_| Composer { text, attached })
+                    },
+                )
+                .unwrap();
+                (window.downcast::<gpui_kit::base::Root>().unwrap(), view)
+            });
+            let text = cx.update(|cx| view.read(cx).text.clone());
+            let dir = super::tests::temp_dir(name);
+            let fixture = Self {
+                window,
+                text,
+                attached,
+                dir,
+            };
+            fixture.ui(cx, |window, text, cx| {
+                window.click(("input", text.entity_id()), cx)
+            });
+            fixture
+        }
+
+        fn ui(
+            &self,
+            cx: &mut TestAppContext,
+            act: impl FnOnce(&mut Window, &Entity<TextareaState>, &mut App),
+        ) {
+            cx.update_window(self.window.into(), |_, window, cx| {
+                window.render_frame(cx);
+                act(window, &self.text, cx);
+            })
+            .unwrap();
+        }
+
+        fn paste(&self, cx: &mut TestAppContext, text: &str) {
+            cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned())));
+            self.ui(cx, |window, _, cx| window.press("secondary-v", cx));
+        }
+
+        fn press(&self, cx: &mut TestAppContext, key: &str) {
+            self.ui(cx, |window, _, cx| window.press(key, cx));
+        }
+
+        fn value(&self, cx: &mut TestAppContext) -> String {
+            cx.update(|cx| self.text.read(cx).value().to_string())
+        }
+
+        fn image(&self) -> String {
+            let path = self.dir.join("Screenshot 1.png");
+            std::fs::write(&path, super::tests::png()).unwrap();
+            format!("'{}'", path.display())
+        }
+
+        fn missing(&self) -> String {
+            self.dir.join("gone.png").display().to_string()
+        }
+
+        /// Lets the read finish and the paste settle.
+        fn settle(&self, cx: &mut TestAppContext) {
+            cx.run_until_parked();
+            self.ui(cx, |_, _, _| {});
+            cx.run_until_parked();
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[gpui_kit::test]
+    fn attached_path_paste_is_undone_back_over_the_selection(cx: &mut TestAppContext) {
+        let composer = Fixture::new(cx, "paste-undo", "draft");
+        composer.ui(cx, |window, _, cx| window.input(" kept", cx));
+        composer.press(cx, "secondary-a");
+        composer.paste(cx, &composer.image());
+        composer.settle(cx);
+        assert_eq!(composer.value(cx), "draft kept");
+        assert_eq!(*composer.attached.borrow(), [Ok(1)]);
+        composer.press(cx, "secondary-z");
+        assert_eq!(composer.value(cx), "draft");
+    }
+
+    #[gpui_kit::test]
+    fn failed_path_paste_is_an_ordinary_undoable_paste(cx: &mut TestAppContext) {
+        let composer = Fixture::new(cx, "paste-fail", "draft");
+        composer.ui(cx, |window, _, cx| window.input(" kept", cx));
+        composer.press(cx, "secondary-a");
+        let missing = composer.missing();
+        composer.paste(cx, &missing);
+        composer.settle(cx);
+        assert_eq!(composer.value(cx), missing);
+        assert!(composer.attached.borrow()[0].is_err());
+        composer.press(cx, "secondary-z");
+        assert_eq!(composer.value(cx), "draft kept");
+        composer.press(cx, "secondary-z");
+        assert_eq!(composer.value(cx), "draft");
+    }
+
+    #[gpui_kit::test]
+    fn path_paste_at_two_cursors_pastes_and_undoes_at_both(cx: &mut TestAppContext) {
+        let composer = Fixture::new(cx, "paste-cursors", "a\nb");
+        let add_cursor = if cfg!(target_os = "macos") {
+            "cmd-alt-up"
+        } else {
+            "ctrl-alt-up"
         };
+        composer.press(cx, add_cursor);
+        let missing = composer.missing();
+        composer.paste(cx, &missing);
+        composer.settle(cx);
+        assert_eq!(composer.value(cx), format!("a{missing}\nb{missing}"));
 
-        state.loading_images(&target);
-        let read = read_pasted_image(pasted_image_path(&text).unwrap());
-        assert_eq!(
-            state.finish_path_paste(&target, read, paste(4..4)),
-            Some(4 + text.len())
+        composer.press(cx, "secondary-z");
+        composer.paste(cx, &composer.image());
+        composer.settle(cx);
+        assert_eq!(composer.value(cx), "a\nb");
+        assert_eq!(composer.attached.borrow()[1], Ok(1));
+        // Both cursors survive the take-back.
+        composer.ui(cx, |window, _, cx| window.input("x", cx));
+        assert_eq!(composer.value(cx), "ax\nbx");
+    }
+
+    #[gpui_kit::test]
+    fn edits_during_a_slow_read_keep_the_paste_where_it_was(cx: &mut TestAppContext) {
+        let composer = Fixture::new(cx, "paste-slow", "see please");
+        composer.press(
+            cx,
+            if cfg!(target_os = "macos") {
+                "cmd-up"
+            } else {
+                "ctrl-home"
+            },
         );
-        assert_eq!(state.draft(&target), format!("see {text} please"));
-        assert!(state.draft_images(&target).is_empty());
-        assert!(!state.is_loading_images(&target));
-
-        // An edit made while the file was read moves the paste to the end.
-        state.edit_draft(&target, "edited");
-        state.loading_images(&target);
-        let read = read_pasted_image(missing.clone());
-        let cursor = state.finish_path_paste(&target, read, paste(4..4));
-        assert_eq!(state.draft(&target), format!("edited{text}"));
-        assert_eq!(cursor, Some(state.draft(&target).len()));
-
-        std::fs::write(&missing, png()).unwrap();
-        state.loading_images(&target);
-        let read = read_pasted_image(missing);
-        assert_eq!(state.finish_path_paste(&target, read, paste(0..0)), None);
-        assert_eq!(state.draft(&target), format!("edited{text}"));
-        assert_eq!(state.draft_images(&target)[0].name(), "gone.png");
-        assert!(!state.is_loading_images(&target));
-        std::fs::remove_dir_all(dir).unwrap();
+        for _ in 0..4 {
+            composer.press(cx, "right");
+        }
+        for paste in [composer.missing(), composer.image()] {
+            composer.attached.borrow_mut().clear();
+            let before = composer.value(cx);
+            composer.paste(cx, &paste);
+            // Typed before the worker's read comes back.
+            composer.ui(cx, |window, _, cx| window.input(" ", cx));
+            composer.settle(cx);
+            let (head, tail) = before.split_at(4);
+            assert_eq!(composer.value(cx), format!("{head}{paste} {tail}"));
+            assert!(composer.attached.borrow()[0].is_err());
+            composer.press(cx, "secondary-z");
+            composer.press(cx, "secondary-z");
+            assert_eq!(composer.value(cx), before);
+        }
     }
 }

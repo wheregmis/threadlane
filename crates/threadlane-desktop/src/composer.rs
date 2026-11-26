@@ -1,7 +1,6 @@
 //! Drafts and the delivery lifecycle for the desktop composer.
 
 use std::collections::HashMap;
-use std::ops::Range;
 
 use threadlane_client::{ClientCore, ClientError, NewTaskSpec, Sent};
 use threadlane_core::attachment::{ImageAttachment, check_image_budget};
@@ -21,17 +20,6 @@ pub enum Draft {
     Lead,
     /// Task lane.
     Task,
-}
-
-/// A text paste held back while the image file it names is read.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HeldPaste {
-    /// The exact clipboard text.
-    pub text: String,
-    /// The draft when the paste happened.
-    pub draft: String,
-    /// The byte range the paste would have replaced in `draft`.
-    pub selection: Range<usize>,
 }
 
 /// Where a submitted draft will go, even if the owner navigates away.
@@ -239,30 +227,6 @@ impl AppState {
             }
             Err(error) => Some(error),
         };
-    }
-
-    /// Completes a pasted image path: attaches the image, or pastes the held
-    /// text as normal when the file could not be attached. Returns the cursor
-    /// offset after the pasted text when the text was pasted.
-    pub fn finish_path_paste(
-        &mut self,
-        destination: &Destination,
-        images: Result<Vec<ImageAttachment>, String>,
-        paste: HeldPaste,
-    ) -> Option<usize> {
-        let Ok(images) = images else {
-            self.attach_images(destination, Ok(Vec::new()));
-            let mut text = self.draft(destination).to_owned();
-            // Paste where the owner pasted unless the draft changed meanwhile.
-            let selection = Some(paste.selection)
-                .filter(|range| text == paste.draft && text.get(range.clone()).is_some())
-                .unwrap_or(text.len()..text.len());
-            text.replace_range(selection.clone(), &paste.text);
-            self.edit_draft(destination, &text);
-            return Some(selection.start + paste.text.len());
-        };
-        self.attach_images(destination, Ok(images));
-        None
     }
 
     /// Removes a selected image from this destination's draft.
