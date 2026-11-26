@@ -1,23 +1,22 @@
 //! Offline coverage of agy's plugin catalog and session handling.
 #![cfg(unix)]
 
-use std::{os::unix::fs::PermissionsExt, time::Duration};
+use std::time::Duration;
 use threadlane_backend_antigravity::AntigravityBackend;
 use threadlane_core::backend::{AgentBackend, BackendEvent, NativeSession, RunRequest};
+use threadlane_testkit::script::write_executable;
 
 #[tokio::test]
 async fn missing_conversation_never_receives_the_prompt() {
     let dir = tempfile::tempdir().unwrap();
     let program = dir.path().join("agy");
-    std::fs::write(
+    write_executable(
         &program,
         r#"#!/bin/sh
 echo '{"event":"init","conversation_id":"replacement","init":{}}'
 if read -r prompt; then touch delivered; fi
 "#,
-    )
-    .unwrap();
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let backend = AntigravityBackend::new(program);
     let request = RunRequest {
         working_dir: dir.path().into(),
@@ -46,7 +45,7 @@ if read -r prompt; then touch delivered; fi
 async fn an_antigravity_task_requests_enabled_plugin_skills_by_name() {
     let dir = tempfile::tempdir().unwrap();
     let program = dir.path().join("agy");
-    std::fs::write(
+    write_executable(
         &program,
         r#"#!/bin/sh
 if [ "$*" = 'plugin list --json' ]; then
@@ -66,9 +65,7 @@ read -r prompt || exit 1
 printf '%s\n' "$prompt" > delivered
 echo '{"event":"result","result":{"status":"SUCCESS"}}'
 "#,
-    )
-    .unwrap();
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let backend = AntigravityBackend::new(program);
     assert_eq!(
         backend.installed_skills(None).await.unwrap(),

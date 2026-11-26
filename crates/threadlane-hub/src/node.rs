@@ -602,8 +602,6 @@ mod tests {
     /// that says nothing and gives a reason.
     #[cfg(unix)]
     fn fake_claude(dir: &Path) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
         let script = r#"#!/bin/sh
 case "$1" in
   --version) echo "2.1.325 (Claude Code)"; exit 0 ;;
@@ -614,8 +612,7 @@ echo '{"type":"system","subtype":"init","session_id":"fake-session","tools":[],"
 echo '{"type":"result","subtype":"success","is_error":false,"result":"Nothing needs saying.","session_id":"fake-session","num_turns":1,"total_cost_usd":0,"usage":{}}'
 "#;
         let program = dir.join("claude");
-        std::fs::write(&program, script).unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        threadlane_testkit::script::write_executable(&program, script);
         program
     }
 

@@ -3,7 +3,6 @@
 
 #![cfg(unix)]
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,6 +17,7 @@ use threadlane_core::backend::{
 };
 use threadlane_core::model::BackendKind;
 use threadlane_core::tools::{Tier, ToolDefinition, ToolEndpoint, ToolError};
+use threadlane_testkit::script::write_executable;
 
 const SESSION: &str = "5f0c2a8e-1b7d-4c39-8e0f-2d6a9b4c7e15";
 
@@ -78,9 +78,7 @@ impl Fake {
             body.replace("@DIR@", &dir.path().display().to_string())
         );
         let program = dir.path().join("claude");
-        std::fs::write(&program, script).expect("writes fake claude");
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
-            .expect("makes fake claude executable");
+        write_executable(&program, &script);
         wait_until_executable(&program);
         Self {
             dir,

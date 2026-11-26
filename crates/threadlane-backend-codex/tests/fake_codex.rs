@@ -5,7 +5,6 @@
 
 #![cfg(unix)]
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -132,19 +131,7 @@ impl Fake {
             .replace("@DIR@", &dir.path().display().to_string())
             .replace("@RULES@", RULES_FILE);
         let program = dir.path().join("codex");
-        // Write a draft and `cp` it to the executable, so this process never
-        // holds the executable open for writing (a forking sibling test would
-        // otherwise make exec fail with ETXTBSY).
-        let draft = dir.path().join("codex.draft");
-        std::fs::write(&draft, script).expect("writes fake codex");
-        std::fs::set_permissions(&draft, std::fs::Permissions::from_mode(0o755))
-            .expect("makes fake codex executable");
-        let copied = std::process::Command::new("cp")
-            .arg(&draft)
-            .arg(&program)
-            .status()
-            .expect("runs cp");
-        assert!(copied.success(), "cp installs fake codex");
+        threadlane_testkit::script::write_executable(&program, &script);
         Self {
             dir,
             work: tempfile::tempdir().expect("temp dir"),

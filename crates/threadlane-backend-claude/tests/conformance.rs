@@ -7,13 +7,13 @@
 
 #![cfg(unix)]
 
-use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tempfile::TempDir;
 use threadlane_backend_claude::{ClaudeBackend, ClaudeConfig};
 use threadlane_testkit::conformance::Conformance;
+use threadlane_testkit::script::write_executable;
 
 const FAKE: &str = r#"#!/bin/sh
 IFS= read -r prompt
@@ -92,13 +92,10 @@ echo "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\"
 fn suite() -> (Conformance, TempDir, TempDir) {
     let dir = tempfile::tempdir().expect("temp dir");
     let program = dir.path().join("claude");
-    std::fs::write(
+    write_executable(
         &program,
-        FAKE.replace("@DIR@", &dir.path().display().to_string()),
-    )
-    .expect("writes fake claude");
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
-        .expect("makes fake claude executable");
+        &FAKE.replace("@DIR@", &dir.path().display().to_string()),
+    );
     let backend = ClaudeBackend::new(ClaudeConfig {
         program,
         config_dir: None,
