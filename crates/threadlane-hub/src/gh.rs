@@ -260,13 +260,12 @@ impl GithubSource for GhSource {
             _ => (target, target.branch.clone()),
         };
         let reference = encode(&reference);
-        let mut items = self
-            .get_items(
-                &format!("repos/{repository}/commits/{reference}/check-runs?per_page=100"),
-                target,
-                settled_check_runs,
-            )
-            .await?;
+        let path = format!("repos/{repository}/commits/{reference}/check-runs?per_page=100");
+        let mut pages = Vec::new();
+        for page in self.get_pages(&[], &path).await? {
+            pages.push(page.json(&path)?);
+        }
+        let mut items = settled_check_runs(&pages, target);
         if let Some(number) = target.number {
             items.extend(
                 self.get_items(
@@ -865,17 +864,21 @@ fn notification(value: &Json) -> Option<GithubItem> {
     })
 }
 
-/// [`parse_check_runs`] for a task's own work. While another check of the
-/// head is still running, the ones that passed are held back: one passed
-/// check decides nothing, and each would wake the task's agent to no end.
-/// They arrive together once the last check finishes; a failure is not held.
-pub(crate) fn settled_check_runs(answer: &Json, target: &PullTarget) -> Vec<GithubItem> {
-    let runs = answer.get("check_runs").and_then(Json::as_array);
-    let running = runs
-        .into_iter()
+/// [`parse_check_runs`] for a task's own work, over every page of the
+/// answer. While another check of the head is still running, on any page,
+/// the ones that passed are held back: one passed check decides nothing, and
+/// each would wake the task's agent to no end. They arrive together once the
+/// last check finishes; a failure is not held.
+pub(crate) fn settled_check_runs(pages: &[Json], target: &PullTarget) -> Vec<GithubItem> {
+    let running = pages
+        .iter()
+        .filter_map(|answer| answer.get("check_runs").and_then(Json::as_array))
         .flatten()
         .any(|run| run["status"] != "completed");
-    let mut items = parse_check_runs(answer, target);
+    let mut items: Vec<GithubItem> = pages
+        .iter()
+        .flat_map(|answer| parse_check_runs(answer, target))
+        .collect();
     if running {
         items.retain(|item| {
             !["success", "skipped", "neutral"]
@@ -1069,9 +1072,22 @@ mod tests {
     fn finished_check_runs_become_check_results() {
         let answer: Json = serde_json::from_str(CHECK_RUNS).unwrap();
         assert_eq!(
-            settled_check_runs(&answer, &target()).len(),
+            settled_check_runs(std::slice::from_ref(&answer), &target()).len(),
             1,
             "for a task, the passed check waits for the run in progress"
+        );
+        // A page of finished checks still waits for one running on another page.
+        let mut finished = answer.clone();
+        finished["check_runs"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|run| run["status"] == "completed");
+        let pages = [finished, answer.clone()];
+        assert_eq!(settled_check_runs(&pages, &target()).len(), 2);
+        assert!(
+            settled_check_runs(&pages, &target())
+                .iter()
+                .all(|item| item.title == "test: failure")
         );
         let items = parse_check_runs(&answer, &target());
         assert_eq!(items.len(), 2, "the run in progress is left out");
@@ -1099,7 +1115,7 @@ mod tests {
                 run["completed_at"] = "2026-11-17T08:40:00Z".into();
             }
         }
-        assert_eq!(settled_check_runs(&answer, &target()).len(), 3);
+        assert_eq!(settled_check_runs(&[answer], &target()).len(), 3);
     }
 
     #[test]
