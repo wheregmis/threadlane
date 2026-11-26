@@ -677,10 +677,10 @@ impl Desktop {
                 textarea
                     .disabled(destination.is_none())
                     .aria_label(label)
-                    .on_paste(move |item, _, cx| {
+                    .on_paste(move |item, window, cx| {
                         if let Some(target) = &paste_to {
                             let _ = view.update(cx, |this, cx| {
-                                this.paste_images(target, item, cx);
+                                this.paste_images(target, item, window, cx);
                             });
                         }
                         false
@@ -777,7 +777,14 @@ impl Desktop {
         .detach();
     }
 
-    fn paste_images(&mut self, target: &Destination, item: &ClipboardItem, cx: &mut Context<Self>) {
+    /// Attaches pasted images, or the image file a pasted path names.
+    fn paste_images(
+        &mut self,
+        target: &Destination,
+        item: &ClipboardItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let images: Vec<_> = item
             .entries()
             .iter()
@@ -787,8 +794,9 @@ impl Desktop {
             })
             .collect();
         if images.is_empty() {
-            return;
+            return self.paste_image_path(target, item, window, cx);
         }
+        // Clipboard images keep any text alongside them.
         self.state.loading_images(target);
         let images = match chat_images::copy_clipboard_images(&images) {
             Ok(images) => images,
@@ -810,6 +818,46 @@ impl Desktop {
             });
         })
         .detach();
+    }
+
+    /// Attaches the image file a pasted path names. The textarea pastes the
+    /// text as usual; the paste is taken back once a worker has read the
+    /// image, and stays as text when the read fails.
+    fn paste_image_path(
+        &mut self,
+        target: &Destination,
+        item: &ClipboardItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = item
+            .text()
+            .and_then(|text| chat_images::pasted_image_path(&text))
+        else {
+            return;
+        };
+        self.state.loading_images(target);
+        cx.notify();
+        let read = cx.background_spawn(async move { chat_images::read_pasted_image(path) });
+        let input = self.draft_input(target.draft()).clone();
+        let view = cx.entity().downgrade();
+        let target = target.clone();
+        let attach = move |images: Result<Vec<_>, String>, cx: &mut App| {
+            view.update(cx, |this, cx| {
+                // Undo while a send is held would cancel the send instead.
+                let images = images.ok().filter(|_| {
+                    this.composer_shown.as_ref() == Some(&target)
+                        && this.state.held_seconds(&target).is_none()
+                });
+                let attached = images.is_some();
+                this.state
+                    .attach_images(&target, Ok(images.unwrap_or_default()));
+                cx.notify();
+                attached
+            })
+            .unwrap_or(false)
+        };
+        chat_images::finish_path_paste(input, read, attach, window, cx);
     }
 
     pub(crate) fn submit_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
