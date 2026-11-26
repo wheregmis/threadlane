@@ -4,7 +4,7 @@ exclude = ["old"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.59"
+version = "0.1.60"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -40,18 +40,18 @@ toml = "1.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 # Pinned per Plan.md §18.1: rerun the crash gate before every upgrade.
-turso = { version = "=0.8.3", default-features = false }
+turso = { version = "=0.8.4", default-features = false }
 rusqlite = { version = "0.43", features = ["bundled"] }
 tempfile = "3"
 # Pinned: iroh's API changes between releases. No default features: no
 # portmapper (it talks to the router) and no metrics; ring for TLS.
-iroh = { version = "=1.4.1", default-features = false, features = ["tls-ring"] }
+iroh = { version = "=1.5.0", default-features = false, features = ["tls-ring"] }
 # Local discovery, which iroh keeps in this separate crate.
 iroh-mdns-address-lookup = "=0.6.1"
 # Pinned: the one time-zone dependency (docs/milestone-8.md §1 decision 2).
 # The zone database is compiled in, so a routine fires at the same local time
 # on every machine whatever its system zone files; nothing else is used.
-jiff = { version = "=0.2.45", default-features = false, features = ["std", "tz-system", "tzdb-bundle-always"] }
+jiff = { version = "=1.0.2", default-features = false, features = ["std", "tz-system", "tzdb-bundle-always"] }
 # Pinned as old/Cargo.toml pins it; GPUI itself comes from the patch below.
 gpui-kit = { git = "https://github.com/longbridge/gpui-kit", rev = "134ddaa0906fbfc688255b33daef0e803a039050" }
 

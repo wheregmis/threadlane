@@ -64,7 +64,7 @@ pub(crate) fn next_occurrence(
     // From the day before: near a transition at midnight, now's local date
     // can be a day past an occurrence that is still to come.
     let mut date = now_at
-        .to_zoned(tz.clone())
+        .to_zoned_datetime(tz.clone())
         .date()
         .yesterday()
         .map_err(fail)?;
@@ -103,7 +103,7 @@ pub(crate) fn tomorrow(now: Timestamp, name: &str) -> Result<(Timestamp, Timesta
     let tz = zone(name)?;
     let at = jiff::Timestamp::from_millisecond(now.as_millis()).map_err(|e| e.to_string())?;
     let day = at
-        .to_zoned(tz.clone())
+        .to_zoned_datetime(tz.clone())
         .date()
         .tomorrow()
         .map_err(|e| e.to_string())?;

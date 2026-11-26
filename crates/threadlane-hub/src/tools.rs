@@ -105,7 +105,8 @@ pub fn offered_in(tool: &str, kind: LaneKind) -> bool {
         | RESOLVE_REVIEW_THREAD
         | REQUEST_REVIEW
         | ATTACH_IMAGE
-        | threadlane_core::forge::CREATE_TAG => kind == LaneKind::Task,
+        | threadlane_core::forge::CREATE_TAG
+        | threadlane_core::forge::FILE_UPSTREAM_ISSUE => kind == LaneKind::Task,
         _ => true,
     }
 }
@@ -623,6 +624,30 @@ impl HubTools {
             }
             None => None,
         };
+        // A queued task that has not started, such as one held by its
+        // agent's usage limit, goes to the agent named (#776).
+        if task.status == TaskStatus::Queued {
+            let agent = agent.ok_or_else(|| {
+                ToolError::InvalidArguments(format!(
+                    "{} is queued, not failed; name another agent to reassign it",
+                    task.id
+                ))
+            })?;
+            let run = self.run(context).await?;
+            let reassigned = self
+                .db
+                .lead_reassign_task(
+                    &context.lease,
+                    task.id,
+                    agent,
+                    &effect_key(context, &run, RETRY_TASK, arguments),
+                    self.clock.now(),
+                )
+                .await
+                .map_err(tool_error)?;
+            self.waker.wake(WakeTarget::Lane(reassigned.lane_id));
+            return Ok(task_json(&reassigned));
+        }
         let run = self.run(context).await?;
         let retried = self
             .db
@@ -1433,7 +1458,9 @@ fn task_definitions() -> Vec<ToolDefinition> {
             "Retry a task that failed because its backend refused the agent's setup, such as \
              its model, or a task in review whose Reviewer failed that way, which queues the \
              review again. Name another agent to reassign the task or the review, or none once \
-             the agent is fixed. The tasks waiting for it stay blocked until it is done.",
+             the agent is fixed. The tasks waiting for it stay blocked until it is done. Naming \
+             an agent also reassigns a queued task that has not started, such as one blocked \
+             because its agent's model account is at its usage limit.",
             Tier::Local,
             json!({
                 "type": "object",
@@ -1616,6 +1643,7 @@ fn cached_definitions() -> &'static [ToolDefinition] {
         ];
         definitions.extend(task_definitions());
         definitions.extend(crate::publish::definitions());
+        definitions.push(crate::upstream::definition());
         definitions.extend(crate::memory::definitions());
         definitions.extend(crate::timers::definitions());
         definitions.push(ask_user_definition());
@@ -1715,6 +1743,7 @@ impl ToolRegistry for HubTools {
             | REQUEST_REVIEW
             | ATTACH_IMAGE
             | threadlane_core::forge::CREATE_TAG
+            | threadlane_core::forge::FILE_UPSTREAM_ISSUE
             | REPORT_LIMITATION => Err(ToolError::Blocked(format!(
                 "{name} is performed only once the user approves it"
             ))),
@@ -1912,6 +1941,7 @@ mod tests {
                     .into_iter()
                     .map(|tool| tool.name),
             );
+            names.push(crate::upstream::definition().name);
             names.extend(
                 crate::memory::definitions()
                     .into_iter()
@@ -1985,7 +2015,8 @@ mod tests {
                     RESOLVE_REVIEW_THREAD,
                     REQUEST_REVIEW,
                     ATTACH_IMAGE,
-                    threadlane_core::forge::CREATE_TAG
+                    threadlane_core::forge::CREATE_TAG,
+                    threadlane_core::forge::FILE_UPSTREAM_ISSUE
                 ][..],
                 &memory,
                 &[REPORT_LIMITATION]
