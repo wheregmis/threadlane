@@ -105,7 +105,8 @@ pub fn offered_in(tool: &str, kind: LaneKind) -> bool {
         | RESOLVE_REVIEW_THREAD
         | REQUEST_REVIEW
         | ATTACH_IMAGE
-        | threadlane_core::forge::CREATE_TAG => kind == LaneKind::Task,
+        | threadlane_core::forge::CREATE_TAG
+        | threadlane_core::forge::FILE_UPSTREAM_ISSUE => kind == LaneKind::Task,
         _ => true,
     }
 }
@@ -1630,6 +1631,7 @@ fn cached_definitions() -> &'static [ToolDefinition] {
         ];
         definitions.extend(task_definitions());
         definitions.extend(crate::publish::definitions());
+        definitions.push(crate::upstream::definition());
         definitions.extend(crate::memory::definitions());
         definitions.extend(crate::timers::definitions());
         definitions.push(ask_user_definition());
@@ -1729,6 +1731,7 @@ impl ToolRegistry for HubTools {
             | REQUEST_REVIEW
             | ATTACH_IMAGE
             | threadlane_core::forge::CREATE_TAG
+            | threadlane_core::forge::FILE_UPSTREAM_ISSUE
             | REPORT_LIMITATION => Err(ToolError::Blocked(format!(
                 "{name} is performed only once the user approves it"
             ))),
@@ -1926,6 +1929,7 @@ mod tests {
                     .into_iter()
                     .map(|tool| tool.name),
             );
+            names.push(crate::upstream::definition().name);
             names.extend(
                 crate::memory::definitions()
                     .into_iter()
@@ -1999,7 +2003,8 @@ mod tests {
                     RESOLVE_REVIEW_THREAD,
                     REQUEST_REVIEW,
                     ATTACH_IMAGE,
-                    threadlane_core::forge::CREATE_TAG
+                    threadlane_core::forge::CREATE_TAG,
+                    threadlane_core::forge::FILE_UPSTREAM_ISSUE
                 ][..],
                 &memory,
                 &[REPORT_LIMITATION]

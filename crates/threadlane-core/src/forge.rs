@@ -22,6 +22,10 @@ pub const EXPECTED_HEAD: &str = "expected_head";
 pub const COMMENT: &str = "comment";
 /// Create an issue in a registered repository.
 pub const CREATE_ISSUE: &str = "create_issue";
+/// Open an issue in a public repository that is not registered with the
+/// project, such as a third-party upstream (#779). The user approves each
+/// filing; no standing rule or default covers it.
+pub const FILE_UPSTREAM_ISSUE: &str = "file_upstream_issue";
 /// Report a product limitation to the Threadlane upstream during a project dream.
 pub const REPORT_LIMITATION: &str = "report_threadlane_limitation";
 /// Merge a registered repository's pull request.
