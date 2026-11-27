@@ -569,6 +569,48 @@ async fn a_stored_call_that_no_longer_hashes_to_what_you_approved_is_not_handed_
     assert_eq!(decision(&hub, 1).await.outcome, Some(outcome));
 }
 
+/// Retargeting a pull request is asked about like any tier 2 change, and
+/// onto a branch other than the default one it is yours alone: warned on
+/// the card, with no standing rule offered (#788).
+#[tokio::test]
+async fn a_retarget_off_the_default_branch_is_yours_with_a_warning() {
+    use threadlane_core::forge::RETARGET_PULL_REQUEST;
+    let (hub, lease, run) = task_run().await;
+    for (call, base) in [("toolu_main", "main"), ("toolu_v2", "v2")] {
+        let asked = hub
+            .link
+            .call_tool(
+                &lease,
+                run.run_id,
+                Some(call),
+                RETARGET_PULL_REQUEST,
+                &json!({ "repository": "app", "number": 7, "base": base }),
+            )
+            .await;
+        assert_eq!(asked, Err(ToolError::WaitingOnYou), "{base}");
+    }
+    let onto_main = decision(&hub, 1).await;
+    assert_eq!(onto_main.tool, RETARGET_PULL_REQUEST);
+    assert!(
+        onto_main
+            .question
+            .starts_with("Change the base of pull request #7 in app to main?"),
+        "{}",
+        onto_main.question
+    );
+    assert!(!onto_main.question.contains("Warning"));
+    assert!(onto_main.offers_standing_rule);
+    let onto_v2 = decision(&hub, 2).await;
+    assert!(
+        onto_v2
+            .question
+            .contains("Warning: v2 is not the repository's default branch main"),
+        "{}",
+        onto_v2.question
+    );
+    assert!(!onto_v2.offers_standing_rule);
+}
+
 #[tokio::test]
 async fn the_gate_refuses_a_call_it_cannot_ask_about_and_opens_nothing() {
     let (hub, lease, run) = task_run().await;

@@ -953,6 +953,59 @@ async fn a_fresh_review_is_requested_only_at_the_approved_head() {
 }
 
 #[tokio::test]
+async fn a_retarget_changes_only_an_open_pull_requests_base() {
+    use threadlane_core::forge::RepositoryAction;
+    let remote = "https://github.test/acme/app.git";
+    let retarget = RepositoryAction::RetargetPullRequest {
+        number: 12.try_into().unwrap(),
+        base: "main".into(),
+    };
+    let gh_with = |state: &str, base: &str| {
+        let gh = FakeGh::new();
+        let pull = serde_json::json!({"state": state, "base": {"ref": base}});
+        std::fs::write(gh.dir.path().join("pull.json"), pull.to_string()).unwrap();
+        gh
+    };
+    let patch = [
+        "api",
+        "--hostname=github.test",
+        "--method=PATCH",
+        "repos/acme/app/pulls/12",
+        "-f",
+        "base=main",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+
+    // Open onto a stale branch: read, then patched onto the new base.
+    let gh = gh_with("open", "v2");
+    let done = GitForge::with_gh(gh.program())
+        .apply(remote, &retarget)
+        .await
+        .unwrap();
+    assert_eq!(done, "Pull request #12 now targets main (was v2).");
+    assert_eq!(gh.invocations(), [get_pull(), patch]);
+
+    // Already on that base: nothing is changed.
+    let gh = gh_with("open", "main");
+    let done = GitForge::with_gh(gh.program())
+        .apply(remote, &retarget)
+        .await
+        .unwrap();
+    assert_eq!(done, "Pull request #12 already targets main.");
+    assert_eq!(gh.invocations(), [get_pull()]);
+
+    // Closed or merged: refused, nothing is changed.
+    let gh = gh_with("closed", "v2");
+    let refused = GitForge::with_gh(gh.program())
+        .apply(remote, &retarget)
+        .await
+        .unwrap_err();
+    assert!(refused.0.contains("#12 is not open"), "{refused}");
+    assert_eq!(gh.invocations(), [get_pull()]);
+}
+
+#[tokio::test]
 async fn a_tag_is_created_only_at_a_commit_where_none_exists_and_publishes_no_release() {
     use threadlane_core::forge::RepositoryAction;
     let remote = "https://github.test/acme/app.git";

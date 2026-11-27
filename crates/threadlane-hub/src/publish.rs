@@ -8,7 +8,7 @@ use threadlane_core::forge::{
     ASSIGN_ISSUE, ATTACH_IMAGE, CLOSE_PULL_REQUEST, COMMENT, CREATE_ISSUE, CREATE_TAG,
     EDIT_PULL_REQUEST, EXPECTED_HEAD, FAST_FORWARD_PULL_REQUEST, GITHUB_CLI, IMAGE_BLOB,
     LABEL_ISSUE, MARK_READY, MAX_LABELS, MAX_MERGE_BATCH, MERGE, ONTO_TASK, OPEN_PULL_REQUEST,
-    PUBLISH_BRANCH, REQUEST_REVIEW, RESOLVE_REVIEW_THREAD, valid_label_name,
+    PUBLISH_BRANCH, REQUEST_REVIEW, RESOLVE_REVIEW_THREAD, RETARGET_PULL_REQUEST, valid_label_name,
 };
 use threadlane_core::link::{DIFF_PREVIEW, PUBLISH_REVISION};
 use threadlane_core::model::{DecisionOption, Lane};
@@ -331,6 +331,21 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
                 "required":["repository","tag","commit"],"additionalProperties":false
             }),
         ),
+        define(
+            RETARGET_PULL_REQUEST,
+            "Change the base branch an open pull request in a registered project repository \
+             merges into, such as one opened onto a stale branch instead of the default branch. \
+             The base must exist on the remote. A base other than the repository's default branch \
+             is always the user's decision. End your turn if the call waits for approval.",
+            json!({
+                "type":"object","properties":{
+                    "repository":repository,
+                    "number":{"type":"integer","minimum":1},
+                    "base":{"type":"string","description":"The branch to merge into, usually the repository's default branch."}
+                },
+                "required":["repository","number","base"],"additionalProperties":false
+            }),
+        ),
     ]
 }
 
@@ -373,6 +388,13 @@ fn gh_args(a: &Json) -> Result<Vec<String>, ToolError> {
             }) =>
         {
             Some(EDIT_PULL_REQUEST)
+        }
+        ("pr", "edit")
+            if args
+                .iter()
+                .any(|arg| arg.starts_with("--base") || arg.starts_with("-B")) =>
+        {
+            Some(RETARGET_PULL_REQUEST)
         }
         ("pr", "close") => Some(CLOSE_PULL_REQUEST),
         ("pr" | "issue", "comment") => Some(COMMENT),
@@ -1044,6 +1066,18 @@ pub(crate) fn repository_action(
                 comment,
             })
         }
+        RETARGET_PULL_REQUEST => {
+            fields(a, &["repository", "number", "base"])?;
+            let base = a["base"]
+                .as_str()
+                .filter(|base| valid_branch_name(base))
+                .ok_or_else(|| invalid("base must be a valid branch name"))?
+                .to_owned();
+            Ok(RepositoryAction::RetargetPullRequest {
+                number: number()?,
+                base,
+            })
+        }
         CREATE_TAG => {
             fields(a, &["repository", "tag", "commit"])?;
             let tag = a["tag"]
@@ -1151,6 +1185,7 @@ pub(crate) async fn proposal(
             | REQUEST_REVIEW
             | ATTACH_IMAGE
             | CREATE_TAG
+            | RETARGET_PULL_REQUEST
     ) {
         return Ok(Proposal {
             question: format!("Allow {tool}?"),
@@ -1250,6 +1285,7 @@ pub(crate) async fn proposal(
             | RESOLVE_REVIEW_THREAD
             | REQUEST_REVIEW
             | CREATE_TAG
+            | RETARGET_PULL_REQUEST
     ) {
         let action = repository_action(tool, arguments)?;
         if matches!(tool, ASSIGN_ISSUE | CREATE_TAG)
@@ -1320,6 +1356,12 @@ pub(crate) async fn proposal(
                     "Request a fresh review of pull request {slug}#{number} in {name} ({}), if \
                      its head is still {expected_head}?",
                     asks.join(" and ")
+                )
+            }
+            threadlane_core::forge::RepositoryAction::RetargetPullRequest { number, base } => {
+                format!(
+                    "Change the base of pull request {slug}#{number} in {name} to {base}?{}",
+                    off_default_warning(repository, base)
                 )
             }
             threadlane_core::forge::RepositoryAction::CreateTag { tag, commit } => {
@@ -1512,7 +1554,8 @@ pub(crate) async fn proposal(
     };
     Ok(Proposal {
         question: format!(
-            "Open a draft pull request from {branch} into {base} of {name}, titled {title:?}?"
+            "Open a draft pull request from {branch} into {base} of {name}, titled {title:?}?{}",
+            off_default_warning(repository, base)
         ),
         context: format!(
             "{about} The branch is pushed to {} first.\n\n{body}",
@@ -1521,6 +1564,57 @@ pub(crate) async fn proposal(
         .trim_end()
         .to_owned(),
     })
+}
+
+/// The base branch a pull request call names when it is not the
+/// repository's default branch (#788): `open_pull_request` with a `base`, or
+/// `retarget_pull_request`. Such a call is always the user's decision, since
+/// a stale base gives the pull request a huge unrelated diff.
+pub(crate) fn off_default_base<'a>(
+    tool: &str,
+    arguments: &'a Json,
+    repository: &threadlane_core::model::Repository,
+) -> Option<&'a str> {
+    if !matches!(tool, OPEN_PULL_REQUEST | RETARGET_PULL_REQUEST) {
+        return None;
+    }
+    arguments["base"]
+        .as_str()
+        .filter(|base| *base != repository.default_branch)
+}
+
+/// Whether a call names a base other than its registered repository's
+/// default branch (see [`off_default_base`]).
+pub(crate) async fn names_off_default_base(
+    db: &HubDb,
+    lane: &Lane,
+    tool: &str,
+    arguments: &Json,
+) -> Result<bool, ToolError> {
+    if !matches!(tool, OPEN_PULL_REQUEST | RETARGET_PULL_REQUEST) || !arguments["base"].is_string()
+    {
+        return Ok(false);
+    }
+    let name = arguments["repository"].as_str();
+    Ok(db
+        .repositories(lane.project_id)
+        .await
+        .map_err(tool_error)?
+        .iter()
+        .find(|repository| Some(repository.name.as_str()) == name)
+        .is_some_and(|repository| off_default_base(tool, arguments, repository).is_some()))
+}
+
+/// The card's warning when `base` is not the repository's default branch.
+fn off_default_warning(repository: &threadlane_core::model::Repository, base: &str) -> String {
+    if base == repository.default_branch {
+        return String::new();
+    }
+    format!(
+        " Warning: {base} is not the repository's default branch {}; a pull request onto \
+         another branch shows that branch's differences too.",
+        repository.default_branch
+    )
 }
 
 /// The card for an `attach_image` call: which file, by the blob ID the
@@ -1784,6 +1878,91 @@ mod tests {
         ] {
             assert!(edit(bad.clone()).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn retarget_needs_a_pull_request_and_a_valid_base() {
+        use threadlane_core::forge::RepositoryAction;
+        let retarget = |a: Json| repository_action(RETARGET_PULL_REQUEST, &a);
+        assert_eq!(
+            retarget(json!({"repository":"app","number":12,"base":"main"})),
+            Ok(RepositoryAction::RetargetPullRequest {
+                number: std::num::NonZeroU64::new(12).unwrap(),
+                base: "main".into(),
+            })
+        );
+        for bad in [
+            json!({"repository":"app","number":12}),
+            json!({"repository":"app","base":"main"}),
+            json!({"repository":"app","number":0,"base":"main"}),
+            json!({"repository":"app","number":12,"base":"-f"}),
+            json!({"repository":"app","number":12,"base":"a..b"}),
+            json!({"repository":"app","number":12,"base":7}),
+            json!({"repository":"app","number":12,"base":"main","title":"x"}),
+        ] {
+            assert!(retarget(bad.clone()).is_err(), "{bad}");
+        }
+        // github_cli points a base change at the dedicated tool.
+        for args in [
+            json!(["pr", "edit", "1", "--base=main"]),
+            json!(["pr", "edit", "1", "--base", "main"]),
+            json!(["pr", "edit", "1", "-B", "main"]),
+        ] {
+            let refused = repository_action(
+                GITHUB_CLI,
+                &json!({"repository":"app","args":args,"missing_tool":"Retarget"}),
+            );
+            assert_eq!(
+                refused,
+                Err(invalid("use the retarget_pull_request tool for this")),
+                "{args}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_base_other_than_the_default_branch_is_off_default() {
+        let repository = threadlane_core::model::Repository {
+            id: threadlane_core::ids::RepositoryId(1),
+            project_id: threadlane_core::ids::ProjectId(1),
+            name: "app".into(),
+            remote_url: "https://github.com/acme/app.git".into(),
+            default_branch: "main".into(),
+            protected_branches: Vec::new(),
+        };
+        let off = |tool: &str, a: Json| off_default_base(tool, &a, &repository).map(str::to_owned);
+        assert_eq!(off(OPEN_PULL_REQUEST, json!({"repository":"app"})), None);
+        assert_eq!(
+            off(OPEN_PULL_REQUEST, json!({"repository":"app","base":"main"})),
+            None
+        );
+        assert_eq!(
+            off(OPEN_PULL_REQUEST, json!({"repository":"app","base":"v2"})),
+            Some("v2".into())
+        );
+        assert_eq!(
+            off(
+                RETARGET_PULL_REQUEST,
+                json!({"repository":"app","number":3,"base":"v2"})
+            ),
+            Some("v2".into())
+        );
+        assert_eq!(
+            off(
+                RETARGET_PULL_REQUEST,
+                json!({"repository":"app","number":3,"base":"main"})
+            ),
+            None
+        );
+        assert_eq!(
+            off(EDIT_PULL_REQUEST, json!({"repository":"app","base":"v2"})),
+            None
+        );
+        assert_eq!(off_default_warning(&repository, "main"), "");
+        assert!(
+            off_default_warning(&repository, "v2")
+                .contains("v2 is not the repository's default branch main")
+        );
     }
 
     #[test]

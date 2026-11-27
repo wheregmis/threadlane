@@ -265,6 +265,57 @@ async fn a_draft_pull_request_is_opened_by_default_without_a_card() {
     );
 }
 
+/// A task agent that asks to open its pull request onto `base`.
+fn ask_onto_script(base: &str) -> Script {
+    let mut arguments = pull_request();
+    arguments["base"] = json!(base);
+    Script::new()
+        .text("The page is done; asking to open the pull request.")
+        .call("toolu_pr", OPEN_PULL_REQUEST, arguments)
+        .finish("Waiting on the user.")
+}
+
+/// Naming the default branch as the base changes nothing: the draft is
+/// still opened by default (#788).
+#[tokio::test]
+async fn a_draft_onto_the_default_branch_named_as_base_is_still_opened_by_default() {
+    let world = publish_world(World::new().await, ask_onto_script("main")).await;
+    let sim = world.boot(CrashPlan::new()).await;
+    sim.send("m-1", "Put the page up and open a pull request")
+        .await;
+    drive(&sim, "approve", None).await.unwrap();
+    assert_published(&sim, "default branch named").await;
+    let decision = sim.decisions().await.remove(0);
+    assert_eq!(decision.answer.as_ref().unwrap()["by_default"], true);
+}
+
+/// A draft onto a branch other than the default one, such as a stale
+/// long-lived branch, is never opened by default: you decide it, warned that
+/// it is not the default branch, and no standing rule is offered (#788).
+#[tokio::test]
+async fn a_draft_onto_another_base_waits_for_you_with_a_warning() {
+    let world = publish_world(World::new().await, ask_onto_script("v2")).await;
+    let sim = world.boot(CrashPlan::new()).await;
+    sim.send("m-1", "Put the page up and open a pull request")
+        .await;
+    live(&sim).await.unwrap();
+    assert_eq!(sim.task("T-0001").await.status, TaskStatus::WaitingOnYou);
+    assert!(
+        sim.world.forge.calls().is_empty(),
+        "nothing before the answer"
+    );
+    let decisions = sim.decisions().await;
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(decisions[0].status, DecisionStatus::Pending);
+    assert!(!decisions[0].offers_standing_rule);
+    let question = &decisions[0].question;
+    assert!(question.contains("into v2 of app"), "{question}");
+    assert!(
+        question.contains("Warning: v2 is not the repository's default branch main"),
+        "{question}"
+    );
+}
+
 #[tokio::test]
 async fn a_finished_task_asks_before_publishing_and_after_the_answer_opens_one_draft() {
     let world = publish_world(World::new().await, ask_script()).await;

@@ -180,6 +180,7 @@ async fn one_goal_becomes_three_tasks_two_run_at_once_and_the_lead_sends_one_com
                     threadlane_hub::REQUEST_REVIEW,
                     threadlane_core::forge::ATTACH_IMAGE,
                     threadlane_core::forge::CREATE_TAG,
+                    threadlane_core::forge::RETARGET_PULL_REQUEST,
                     threadlane_core::forge::FILE_UPSTREAM_ISSUE,
                     MEMORY_VIEW,
                     MEMORY_CREATE,

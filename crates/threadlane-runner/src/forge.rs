@@ -218,6 +218,51 @@ impl GitForge {
         Ok(pull)
     }
 
+    /// Points the numbered open pull request at `base` (#788). A closed or
+    /// merged one is refused, and one already on `base` is left as it is.
+    async fn retarget_pull_request(
+        &self,
+        repo: &str,
+        number: std::num::NonZeroU64,
+        base: &str,
+    ) -> Result<String, ForgeError> {
+        let (host, name) = repo
+            .split_once('/')
+            .ok_or_else(|| ForgeError("the registered remote has no repository name".into()))?;
+        let hostname = format!("--hostname={host}");
+        let endpoint = format!("repos/{name}/pulls/{number}");
+        let here = Path::new(".");
+        let output = self
+            .gh(here, args(&["api", &hostname, "--method=GET", &endpoint]))
+            .await?;
+        let pull: Json = serde_json::from_str(&output)
+            .map_err(|error| ForgeError(format!("invalid pull request response: {error}")))?;
+        if pull["state"] != "open" {
+            return Err(ForgeError(format!(
+                "pull request #{number} is not open; only an open pull request can be retargeted"
+            )));
+        }
+        let old = pull["base"]["ref"].as_str().unwrap_or_default();
+        if old == base {
+            return Ok(format!("Pull request #{number} already targets {base}."));
+        }
+        self.gh(
+            here,
+            args(&[
+                "api",
+                &hostname,
+                "--method=PATCH",
+                &endpoint,
+                "-f",
+                &format!("base={base}"),
+            ]),
+        )
+        .await?;
+        Ok(format!(
+            "Pull request #{number} now targets {base} (was {old})."
+        ))
+    }
+
     /// An error unless `expected_head` contains `fixed_by`.
     async fn check_contains(
         &self,
@@ -1236,6 +1281,9 @@ impl Forge for GitForge {
             RepositoryAction::CreateTag { tag, commit } => {
                 return self.create_tag(&repo, tag, commit).await;
             }
+            RepositoryAction::RetargetPullRequest { number, base } => {
+                return self.retarget_pull_request(&repo, *number, base).await;
+            }
             RepositoryAction::MergeBatch { pulls } => return self.merge_batch(&repo, pulls).await,
             RepositoryAction::MarkReadyBatch { numbers } => {
                 return self.mark_ready_batch(&repo, numbers).await;
@@ -1292,7 +1340,8 @@ impl Forge for GitForge {
             | RepositoryAction::RequestReview { .. }
             | RepositoryAction::MergeBatch { .. }
             | RepositoryAction::MarkReadyBatch { .. }
-            | RepositoryAction::CreateTag { .. } => unreachable!("handled above"),
+            | RepositoryAction::CreateTag { .. }
+            | RepositoryAction::RetargetPullRequest { .. } => unreachable!("handled above"),
             RepositoryAction::GhCli { args } => args.iter().map(OsString::from).collect(),
             RepositoryAction::AssignIssue { number } => {
                 args(&["issue", "edit", &number.to_string(), "--add-assignee=@me"])

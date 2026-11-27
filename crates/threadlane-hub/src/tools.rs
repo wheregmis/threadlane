@@ -106,6 +106,7 @@ pub fn offered_in(tool: &str, kind: LaneKind) -> bool {
         | REQUEST_REVIEW
         | ATTACH_IMAGE
         | threadlane_core::forge::CREATE_TAG
+        | threadlane_core::forge::RETARGET_PULL_REQUEST
         | threadlane_core::forge::FILE_UPSTREAM_ISSUE => kind == LaneKind::Task,
         _ => true,
     }
@@ -1743,6 +1744,7 @@ impl ToolRegistry for HubTools {
             | REQUEST_REVIEW
             | ATTACH_IMAGE
             | threadlane_core::forge::CREATE_TAG
+            | threadlane_core::forge::RETARGET_PULL_REQUEST
             | threadlane_core::forge::FILE_UPSTREAM_ISSUE
             | REPORT_LIMITATION => Err(ToolError::Blocked(format!(
                 "{name} is performed only once the user approves it"
@@ -2016,6 +2018,7 @@ mod tests {
                     REQUEST_REVIEW,
                     ATTACH_IMAGE,
                     threadlane_core::forge::CREATE_TAG,
+                    threadlane_core::forge::RETARGET_PULL_REQUEST,
                     threadlane_core::forge::FILE_UPSTREAM_ISSUE
                 ][..],
                 &memory,
