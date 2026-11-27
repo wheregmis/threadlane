@@ -11,11 +11,15 @@ use threadlane_core::forge::{
 use threadlane_core::ids::{RunId, TaskId};
 use threadlane_core::link::{
     DIFF_PREVIEW, FINISH_TASK, HubLink, MERGE_CHECKS, PROGRESS_WRITTEN, PUBLISH_REVISION,
+    START_FROM, START_PATCHES,
 };
 use threadlane_core::model::Repository;
 use threadlane_core::tools::{ToolDefinition, ToolEndpoint, ToolError};
 use threadlane_core::workspace::Workspaces;
 use tracing::warn;
+
+/// The hub tool that creates a task, a subtask from inside one.
+const CREATE_TASK: &str = "create_task";
 
 use crate::lane::{LaneState, Stop};
 
@@ -149,6 +153,46 @@ impl LaneTools {
 }
 
 impl LaneTools {
+    /// `create_task` arguments with the commits `start_from` names in this
+    /// task's worktrees, as [`START_PATCHES`] for the subtask's branch
+    /// (#790). A lead has no worktrees, so its call goes on as it is and the
+    /// hub refuses `start_from`.
+    async fn with_start_patches(&self, mut arguments: Json) -> Result<Json, ToolError> {
+        if let Some(object) = arguments.as_object_mut() {
+            object.remove(START_PATCHES);
+        }
+        let Some((task, repositories)) = &self.task else {
+            return Ok(arguments);
+        };
+        let Some(named) = arguments.get(START_FROM).and_then(Json::as_object) else {
+            return Ok(arguments);
+        };
+        let mut patches = Vec::with_capacity(named.len());
+        for (name, revision) in named {
+            let repository = repositories
+                .iter()
+                .find(|repo| &repo.name == name)
+                .ok_or_else(|| {
+                    ToolError::InvalidArguments(format!(
+                        "start_from: {name:?} is not one of your task's repositories"
+                    ))
+                })?;
+            let revision = revision.as_str().ok_or_else(|| {
+                ToolError::InvalidArguments(format!(
+                    "start_from: the value for {name:?} must be a commit or branch"
+                ))
+            })?;
+            let patch = self
+                .workspaces
+                .start_patch(*task, repository, revision)
+                .await
+                .map_err(|error| ToolError::InvalidArguments(format!("start_from: {}", error.0)))?;
+            patches.push(patch);
+        }
+        arguments[START_PATCHES] = serde_json::json!(patches);
+        Ok(arguments)
+    }
+
     /// `attach_image` arguments with the image's absolute path and Git blob
     /// ID, so the approval card shows which file and covers its bytes.
     async fn with_image_blob(&self, mut arguments: Json) -> Result<Json, ToolError> {
@@ -213,6 +257,8 @@ impl ToolEndpoint for LaneTools {
             self.with_merge_checks(arguments).await
         } else if name == ATTACH_IMAGE {
             self.with_image_blob(arguments).await?
+        } else if name == CREATE_TASK {
+            self.with_start_patches(arguments).await?
         } else if matches!(
             name,
             PUBLISH_BRANCH | OPEN_PULL_REQUEST | FAST_FORWARD_PULL_REQUEST

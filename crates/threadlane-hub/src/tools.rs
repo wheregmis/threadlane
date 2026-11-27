@@ -13,7 +13,7 @@ use threadlane_core::forge::{
     PUBLISH_BRANCH, REPORT_LIMITATION, REQUEST_REVIEW, RESOLVE_REVIEW_THREAD,
 };
 use threadlane_core::ids::{AgentId, ProjectId, RepositoryId, TaskId};
-use threadlane_core::link::MERGE_CHECKS;
+use threadlane_core::link::{MERGE_CHECKS, START_FROM, START_PATCHES};
 use threadlane_core::model::Repository;
 use threadlane_core::model::{
     BackendKind, Decision, DecisionOption, LaneKind, MemoryAuthor, Mode, NewOutboxMessage, NewTask,
@@ -25,7 +25,7 @@ use threadlane_core::store::{
 };
 use threadlane_core::time::Clock;
 use threadlane_core::tools::{Tier, ToolContext, ToolDefinition, ToolError, ToolRegistry};
-use threadlane_core::workspace::{MergeCheck, ReviewRevision};
+use threadlane_core::workspace::{MAX_START_PATCH, MergeCheck, ReviewRevision, StartPatch};
 use threadlane_store::{HubDb, PrReviewAssignment, PrReviewHead, PrReviewStatus};
 
 use crate::error::tool_error;
@@ -439,6 +439,10 @@ impl HubTools {
             created_at: self.clock.now(),
             playbooks: crate::context::merge_playbooks(&agent.playbooks, &[], goal),
         };
+        let start = start_patches(object, context.task_id.is_some(), &spec.repositories)?;
+        if !start.is_empty() && object.contains_key("pr_review") {
+            return Err(invalid("a PR review task cannot take start_from"));
+        }
         let task = if let Some(args) = object.get("pr_review") {
             let target = review_head(&self.db, context.project_id, args).await?;
             if !spec.repositories.contains(&target.repository) {
@@ -462,7 +466,7 @@ impl HubTools {
             }
         } else {
             self.db
-                .create_task_for_ask(Some(&context.lease), &spec, space_lead_ask)
+                .create_task_with_start(Some(&context.lease), &spec, space_lead_ask, &start)
                 .await
                 .map_err(tool_error)?
         };
@@ -1018,6 +1022,74 @@ fn effect_key(context: &ToolContext, run: &Run, tool: &str, arguments: &Json) ->
     }
 }
 
+/// The commits a subtask's branch starts with (#790): the runner turns the
+/// agent's `start_from` into [`START_PATCHES`] from the creating task's
+/// worktrees, so a call with one must have the other, from inside a task,
+/// for repositories the subtask works in.
+fn start_patches(
+    object: &Map<String, Json>,
+    in_task: bool,
+    repositories: &[RepositoryId],
+) -> Result<Vec<StartPatch>, ToolError> {
+    let named = match object.get(START_FROM) {
+        None | Some(Json::Null) => {
+            return if object.contains_key(START_PATCHES) {
+                Err(invalid(
+                    "start_patches is set by the system, not by the call",
+                ))
+            } else {
+                Ok(Vec::new())
+            };
+        }
+        Some(Json::Object(named)) if !named.is_empty() => named,
+        Some(_) => {
+            return Err(invalid(
+                "start_from must map repository names to a commit or branch",
+            ));
+        }
+    };
+    if !in_task {
+        return Err(invalid(
+            "start_from hands over commits of your task's worktrees, so it works only from inside a task",
+        ));
+    }
+    let patches: Vec<StartPatch> = match object.get(START_PATCHES) {
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|error| invalid(&format!("start_patches: {error}")))?,
+        None => {
+            return Err(invalid(
+                "this runner could not read start_from; the commits were not handed over",
+            ));
+        }
+    };
+    if patches.len() != named.len() {
+        return Err(invalid("start_patches does not match start_from"));
+    }
+    let mut seen = Vec::new();
+    let mut size = 0;
+    for patch in &patches {
+        if !repositories.contains(&patch.repository) {
+            return Err(invalid(
+                "start_from names a repository the subtask does not work in; add it to repositories",
+            ));
+        }
+        if seen.contains(&patch.repository) {
+            return Err(invalid("start_from names a repository twice"));
+        }
+        seen.push(patch.repository);
+        if !threadlane_core::workspace::valid_commit_id(&patch.base) || patch.patch.is_empty() {
+            return Err(invalid("start_patches holds a malformed patch"));
+        }
+        size += patch.patch.len();
+    }
+    if size > MAX_START_PATCH {
+        return Err(invalid(&format!(
+            "the commits in start_from are {size} bytes; at most {MAX_START_PATCH} can be handed over"
+        )));
+    }
+    Ok(patches)
+}
+
 /// The fields of a `create_task` call, checked.
 pub(crate) struct TaskCall<'a> {
     pub object: &'a Map<String, Json>,
@@ -1040,6 +1112,8 @@ impl<'a> TaskCall<'a> {
                 "priority",
                 "repositories",
                 "pr_review",
+                START_FROM,
+                START_PATCHES,
             ],
         )?;
         Ok(Self {
@@ -1423,6 +1497,16 @@ fn task_definitions() -> Vec<ToolDefinition> {
                         "description": "The names of this project's repositories the task \
                                         works in; it gets its own worktree of each, on its own \
                                         branch. A subtask defaults to its parent's."
+                    },
+                    "start_from": {
+                        "type": "object",
+                        "additionalProperties": { "type": "string" },
+                        "description": "From inside a task: per repository name, a commit or \
+                                        local branch in your worktree. The subtask's branch \
+                                        starts from the default branch with the commits from \
+                                        where that leaves the default branch up to it, so a \
+                                        separate finding can get its own pull request. Commit \
+                                        it on a side branch (git switch -c), then switch back."
                     }
                 },
                 "required": ["title", "goal"],

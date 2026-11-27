@@ -3273,3 +3273,102 @@ async fn a_repeated_reassignment_from_a_resumed_lead_session_keeps_your_choice()
     assert_eq!(repeated["status"], "queued", "{repeated}");
     assert_eq!(task(&hub, "T-0001").await.agent_id, engineer, "your choice");
 }
+
+/// #790: a task hands a separate finding to a subtask. The runner turns
+/// `start_from` into start patches; the hub keeps them with the subtask and
+/// gives them to its runs, and refuses them anywhere else.
+#[tokio::test]
+async fn a_task_hands_commits_to_a_subtask_it_creates() {
+    let (hub, lease, run) = lead_run(2).await;
+    let general = hub.general().await;
+    let mut repositories = Vec::new();
+    for name in ["app", "docs"] {
+        repositories.push(
+            hub.db
+                .create_repository(&threadlane_core::model::NewRepository {
+                    project_id: general.id,
+                    name: name.into(),
+                    remote_url: format!("/repos/{name}.git"),
+                    default_branch: "main".into(),
+                    protected_branches: Vec::new(),
+                })
+                .await
+                .unwrap(),
+        );
+    }
+    let (app, docs) = (repositories[0].id, repositories[1].id);
+    let patch = |repository: threadlane_core::ids::RepositoryId| json!([{ "repository": repository, "base": "a".repeat(40), "patch": "From 1\n" }]);
+
+    // A lead has no worktree to hand commits from.
+    let mut args = task_args("page", &[]);
+    args["repositories"] = json!(["app"]);
+    args["start_from"] = json!({ "app": "finding-2" });
+    args["start_patches"] = patch(app);
+    let refused = call(&hub, &lease, &run, "lead-start", CREATE_TASK, args).await;
+    assert!(
+        matches!(&refused, Err(ToolError::InvalidArguments(why)) if why.contains("only from inside a task")),
+        "{refused:?}"
+    );
+    let mut args = task_args("page", &[]);
+    args["repositories"] = json!(["app"]);
+    call(&hub, &lease, &run, "toolu_1", CREATE_TASK, args)
+        .await
+        .unwrap();
+    finish_run(&hub, &lease, &run).await;
+
+    let (lease, task_run) = begin(&*hub.link).await;
+    assert_eq!(task_run.task_id, Some(TaskId(1)));
+    assert!(task_run.start_patches.is_empty());
+    for (arguments, says) in [
+        (
+            json!({ "title": "x", "goal": "x", "start_patches": patch(app) }),
+            "set by the system",
+        ),
+        (
+            json!({ "title": "x", "goal": "x", "start_from": { "app": "finding-2" } }),
+            "could not read start_from",
+        ),
+        (
+            json!({ "title": "x", "goal": "x", "start_from": { "docs": "f" }, "start_patches": patch(docs) }),
+            "does not work in",
+        ),
+        (
+            json!({ "title": "x", "goal": "x", "start_from": "finding-2" }),
+            "must map repository names",
+        ),
+    ] {
+        let refused = call(&hub, &lease, &task_run, says, CREATE_TASK, arguments).await;
+        assert!(
+            matches!(&refused, Err(ToolError::InvalidArguments(why)) if why.contains(says)),
+            "{says}: {refused:?}"
+        );
+    }
+    assert_eq!(tasks(&hub).await.len(), 1, "nothing else was created");
+
+    let created = call(
+        &hub,
+        &lease,
+        &task_run,
+        "toolu_2",
+        CREATE_TASK,
+        json!({
+            "title": "second finding",
+            "goal": "the second finding has its own PR",
+            "start_from": { "app": "finding-2" },
+            "start_patches": patch(app),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(created["task_id"], "T-0002");
+    assert_eq!(created["parent_task_id"], "T-0001");
+    let handed: Vec<threadlane_core::workspace::StartPatch> =
+        serde_json::from_value(patch(app)).unwrap();
+    assert_eq!(hub.db.start_patches(TaskId(2)).await.unwrap(), handed);
+    assert!(hub.db.start_patches(TaskId(1)).await.unwrap().is_empty());
+    finish_run(&hub, &lease, &task_run).await;
+
+    let (_lease, sub_run) = begin(&*hub.link).await;
+    assert_eq!(sub_run.task_id, Some(TaskId(2)));
+    assert_eq!(sub_run.start_patches, handed, "the subtask's runs get them");
+}

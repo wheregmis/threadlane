@@ -28,9 +28,9 @@ use async_trait::async_trait;
 use threadlane_core::ids::{RepositoryId, TaskId};
 use threadlane_core::model::Repository;
 use threadlane_core::workspace::{
-    DiffFileStat, DiffPreview, MergeCheck, PublishPreview, ReviewCheckout, ReviewRevision,
-    WorkspaceCounts, WorkspaceError, WorkspaceRemoval, Workspaces, task_branch, valid_branch_name,
-    valid_commit_id, valid_repository_name,
+    DiffFileStat, DiffPreview, MAX_START_PATCH, MergeCheck, PublishPreview, ReviewCheckout,
+    ReviewRevision, StartPatch, WorkspaceCounts, WorkspaceError, WorkspaceRemoval, Workspaces,
+    task_branch, valid_branch_name, valid_commit_id, valid_repository_name,
 };
 use tokio::process::Command;
 use tokio::sync::{Mutex, OwnedMutexGuard};
@@ -146,10 +146,16 @@ impl GitWorkspaces {
     /// The task's worktree of `repository`, made on the task branch if it is
     /// not whole: from the branch if it exists, else from the latest
     /// default branch.
+    ///
+    /// A task branch made here starts with `start` applied (#790): on its
+    /// base when this clone has it, else on the latest default branch. A
+    /// patch that does not apply leaves no branch, so the next attempt tries
+    /// again rather than losing it.
     async fn worktree_of(
         &self,
         task: TaskId,
         repository: &Repository,
+        start: Option<&StartPatch>,
     ) -> Result<PathBuf, WorkspaceError> {
         let path = self.worktree(task, repository);
         if self.is_ready(task, repository) {
@@ -171,7 +177,23 @@ impl GitWorkspaces {
         )
         .await
         .is_ok();
-        let base = format!("origin/{}", repository.default_branch);
+        let mut base = format!("origin/{}", repository.default_branch);
+        let start = start.filter(|_| !exists);
+        if let Some(start) = start {
+            if !valid_commit_id(&start.base) {
+                return Err(WorkspaceError(format!(
+                    "the start patch of {} has no valid base",
+                    repository.name
+                )));
+            }
+            let commit = format!("{}^{{commit}}", start.base);
+            if git(Some(&clone), ["cat-file", "-e", commit.as_str()])
+                .await
+                .is_ok()
+            {
+                base.clone_from(&start.base);
+            }
+        }
         let mut args = vec![
             OsStr::new("worktree"),
             OsStr::new("add"),
@@ -183,10 +205,63 @@ impl GitWorkspaces {
         args.extend([OsStr::new("--"), path.as_os_str()]);
         args.push(OsStr::new(if exists { &branch } else { &base }));
         git(Some(&clone), args).await?;
+        if let Some(start) = start
+            && let Err(error) = self.apply_start(task, repository, &path, start).await
+        {
+            let _ = git(
+                Some(&clone),
+                [
+                    OsStr::new("worktree"),
+                    OsStr::new("remove"),
+                    OsStr::new("--force"),
+                    OsStr::new("--"),
+                    path.as_os_str(),
+                ],
+            )
+            .await;
+            let _ = git(Some(&clone), ["branch", "-D", "--", branch.as_str()]).await;
+            return Err(error);
+        }
         tokio::fs::write(&marker, b"")
             .await
             .map_err(|error| io_error("marking the worktree ready", &marker, &error))?;
         Ok(path)
+    }
+
+    /// Applies `start` as commits on the new task branch checked out at
+    /// `path`, keeping their authors and messages.
+    async fn apply_start(
+        &self,
+        task: TaskId,
+        repository: &Repository,
+        path: &Path,
+        start: &StartPatch,
+    ) -> Result<(), WorkspaceError> {
+        let file = self
+            .task_dir(task)
+            .join(format!(".{}.start.patch", repository.name));
+        tokio::fs::write(&file, start.patch.as_bytes())
+            .await
+            .map_err(|error| io_error("writing the start patch", &file, &error))?;
+        let mut args: Vec<&OsStr> = COMMITTER.iter().map(OsStr::new).collect();
+        args.extend([
+            OsStr::new("am"),
+            OsStr::new("--quiet"),
+            OsStr::new("--3way"),
+            OsStr::new("--keep-cr"),
+            OsStr::new("--"),
+            file.as_os_str(),
+        ]);
+        let applied = git(Some(path), args).await;
+        remove_file(&file).await?;
+        if let Err(error) = applied {
+            let _ = git(Some(path), ["am", "--abort"]).await;
+            return Err(WorkspaceError(format!(
+                "the commits handed to {task} do not apply to {}: {error}",
+                repository.name
+            )));
+        }
+        Ok(())
     }
 
     /// Fetches the default branch into the repository's clone and returns
@@ -556,13 +631,127 @@ impl Workspaces for GitWorkspaces {
         task: TaskId,
         repositories: &[Repository],
     ) -> Result<Vec<PathBuf>, WorkspaceError> {
+        self.prepare_with_start(task, repositories, &[]).await
+    }
+
+    async fn prepare_with_start(
+        &self,
+        task: TaskId,
+        repositories: &[Repository],
+        start: &[StartPatch],
+    ) -> Result<Vec<PathBuf>, WorkspaceError> {
         let mut paths = Vec::with_capacity(repositories.len());
         for repository in repositories {
             check(repository)?;
             let _repo = self.lock_repository(repository.id).await;
-            paths.push(self.worktree_of(task, repository).await?);
+            let patch = start.iter().find(|patch| patch.repository == repository.id);
+            paths.push(self.worktree_of(task, repository, patch).await?);
         }
         Ok(paths)
+    }
+
+    async fn start_patch(
+        &self,
+        task: TaskId,
+        repository: &Repository,
+        revision: &str,
+    ) -> Result<StartPatch, WorkspaceError> {
+        check(repository)?;
+        if revision.is_empty() || revision.starts_with('-') {
+            return Err(WorkspaceError(format!(
+                "{revision:?} is not a commit or branch"
+            )));
+        }
+        let _repo = self.lock_repository(repository.id).await;
+        if !self.is_ready(task, repository) {
+            return Err(WorkspaceError(format!(
+                "{task} has no worktree of {}",
+                repository.name
+            )));
+        }
+        let path = self.worktree(task, repository);
+        let commit = format!("{revision}^{{commit}}");
+        let head = git(
+            Some(&path),
+            [
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "--end-of-options",
+                commit.as_str(),
+            ],
+        )
+        .await
+        .map_err(|_| {
+            WorkspaceError(format!(
+                "{revision:?} is not a commit or branch in your worktree of {}",
+                repository.name
+            ))
+        })?;
+        let head = head.trim().to_owned();
+        let default = format!("origin/{}", repository.default_branch);
+        let base = git(Some(&path), ["merge-base", default.as_str(), head.as_str()]).await?;
+        let base = base.trim().to_owned();
+        let range = format!("{base}..{head}");
+        if base == head {
+            return Err(WorkspaceError(format!(
+                "{revision:?} has no commits beyond {default} in {}",
+                repository.name
+            )));
+        }
+        let merges = git(Some(&path), ["rev-list", "--merges", range.as_str()]).await?;
+        if !merges.trim().is_empty() {
+            return Err(WorkspaceError(format!(
+                "{revision:?} has merge commits since it left {default}; hand over a branch \
+                 of plain commits on {default}"
+            )));
+        }
+        let args: Vec<OsString> = [
+            "format-patch",
+            "--stdout",
+            "--binary",
+            "--full-index",
+            "--no-signature",
+            range.as_str(),
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        let mut command = git_command(Some(&path), &args);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(GIT_TIMEOUT, command.output())
+            .await
+            .map_err(|_| WorkspaceError(timed_out("git", &args, GIT_TIMEOUT)))?
+            .map_err(|error| WorkspaceError(format!("could not run git format-patch: {error}")))?;
+        if !output.status.success() {
+            return Err(WorkspaceError(format!(
+                "git format-patch failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        // A lossy conversion would change the commits; binary files come
+        // out as text, so only text in another encoding is refused.
+        let patch = String::from_utf8(output.stdout).map_err(|_| {
+            WorkspaceError(format!(
+                "the commits of {revision:?} change text that is not UTF-8, which cannot be handed over"
+            ))
+        })?;
+        if patch.len() > MAX_START_PATCH {
+            return Err(WorkspaceError(format!(
+                "the commits of {revision:?} are {} bytes; at most {MAX_START_PATCH} can be handed over",
+                patch.len()
+            )));
+        }
+        Ok(StartPatch {
+            repository: repository.id,
+            base,
+            patch,
+        })
     }
 
     async fn verify_submission(

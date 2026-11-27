@@ -68,6 +68,7 @@ pub fn assignment(run: i64) -> RunAssignment {
         repositories: Vec::new(),
         review: None,
         pr_review: None,
+        start_patches: Vec::new(),
         events: vec![EventId(1000 + run)],
         perform: Vec::new(),
         backend: BackendKind::Claude,

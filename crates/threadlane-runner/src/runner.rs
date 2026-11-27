@@ -1016,7 +1016,7 @@ impl Inner {
             .ok_or("the publish approval has no commit SHA. Request approval again.")?;
         let worktrees = self
             .workspaces
-            .prepare(task, &assignment.repositories)
+            .prepare_with_start(task, &assignment.repositories, &assignment.start_patches)
             .await
             .map_err(|error| error.to_string())?;
         let worktree = worktrees.get(index).ok_or("no worktree was set up")?;
@@ -1132,7 +1132,7 @@ impl Inner {
     ) -> Result<Json, String> {
         let worktrees = self
             .workspaces
-            .prepare(task, &assignment.repositories)
+            .prepare_with_start(task, &assignment.repositories, &assignment.start_patches)
             .await
             .map_err(|error| error.to_string())?;
         let worktree = worktrees.get(index).ok_or("no worktree was set up")?;
@@ -1388,7 +1388,11 @@ impl Inner {
                 None if assignment.repositories.is_empty() => Ok(Vec::new()),
                 None => {
                     self.workspaces
-                        .prepare(task, &assignment.repositories)
+                        .prepare_with_start(
+                            task,
+                            &assignment.repositories,
+                            &assignment.start_patches,
+                        )
                         .await
                 }
             }

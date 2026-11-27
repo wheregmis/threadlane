@@ -119,6 +119,23 @@ pub struct ReviewRevision {
     pub commit: String,
 }
 
+/// Commits a task hands to a subtask it creates, so the subtask's branch
+/// starts with them (#790): the creating task's worktree, as `git
+/// format-patch` writes it, from `base`, where it leaves the default branch.
+/// It travels in the hub's database, so it reaches a subtask on any machine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartPatch {
+    pub repository: RepositoryId,
+    /// The commit the patch applies on, full SHA.
+    pub base: String,
+    /// The commits, one `git format-patch --stdout` mailbox.
+    pub patch: String,
+}
+
+/// The most a subtask's start patches may hold, in bytes, all repositories
+/// together: they travel in one tool call and in each run assignment.
+pub const MAX_START_PATCH: usize = 1 << 20;
+
 /// Whether an ID names a complete Git SHA-1 or SHA-256 object.
 #[must_use]
 pub fn valid_commit_id(commit: &str) -> bool {
@@ -148,6 +165,35 @@ pub trait Workspaces: Send + Sync + fmt::Debug {
         task: TaskId,
         repositories: &[Repository],
     ) -> Result<Vec<PathBuf>, WorkspaceError>;
+
+    /// Like [`Self::prepare`], but a task branch made here, one that did not
+    /// exist yet, starts with the repository's [`StartPatch`] applied. A
+    /// branch that exists is used as it is, so the patch is applied once.
+    async fn prepare_with_start(
+        &self,
+        task: TaskId,
+        repositories: &[Repository],
+        start: &[StartPatch],
+    ) -> Result<Vec<PathBuf>, WorkspaceError> {
+        let _ = start;
+        self.prepare(task, repositories).await
+    }
+
+    /// The commits from where `revision` (a commit or branch in the task's
+    /// worktree of `repository`) leaves the default branch up to it, as a
+    /// [`StartPatch`] for a subtask. Fails when there are none.
+    async fn start_patch(
+        &self,
+        task: TaskId,
+        repository: &Repository,
+        revision: &str,
+    ) -> Result<StartPatch, WorkspaceError> {
+        let _ = (task, revision);
+        Err(WorkspaceError(format!(
+            "this machine cannot hand commits of {} to a subtask",
+            repository.name
+        )))
+    }
 
     /// Checks out the submitted commits in separate worktrees for the task's review round.
     async fn prepare_review(
