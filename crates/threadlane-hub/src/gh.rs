@@ -534,6 +534,7 @@ impl GithubSource for GhSource {
         Ok(PullRequestState {
             head_repository: text(&pull, "/head/repo/full_name").unwrap_or_default(),
             head_ref,
+            base_ref: text(&pull, "/base/ref").unwrap_or_default(),
             head_sha,
             draft: pull["draft"] == true,
             mergeable_state: text(&pull, "/mergeable_state")
@@ -1868,6 +1869,7 @@ case "$last" in
             PullRequestState {
                 head_repository: "acme/widgets".into(),
                 head_ref: "codex/agent-model-preferences".into(),
+                base_ref: "main".into(),
                 head_sha: "6dcb09b5b57875f334f61aebed695e2e4193db5e".into(),
                 draft: true,
                 mergeable_state: "clean".into(),

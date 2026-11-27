@@ -1877,6 +1877,7 @@ fn conflicted_draft(head: &str) -> PullRequestState {
     PullRequestState {
         head_repository: "acme/widgets".into(),
         head_ref: BRANCH.into(),
+        base_ref: "main".into(),
         head_sha: head.into(),
         draft: true,
         mergeable_state: "dirty".into(),

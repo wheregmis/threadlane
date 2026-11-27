@@ -722,6 +722,14 @@ pub(crate) async fn lead_merge_refusal(
                 pull.head_sha
             )));
         }
+        if pull.base_ref != repository.default_branch {
+            return Ok(Some(format!(
+                "#{number} merges into {}, not the default branch {}; a task review covers \
+                 a head against the default branch only, so retarget it with \
+                 retarget_pull_request or leave this merge to the user",
+                pull.base_ref, repository.default_branch
+            )));
+        }
         if !pull.green() {
             let unfinished: Vec<String> = pull
                 .checks

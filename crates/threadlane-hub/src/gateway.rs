@@ -396,8 +396,11 @@ impl LocalLink {
             return Ok(None);
         };
         // The merge is pinned to this head, so the approval must be for it too.
+        // A task review covers the head against the default branch only, so
+        // a pull request retargeted elsewhere is merged only once you decide (#788).
         let checks_pass = tool != crate::MERGE
             || (pull.green()
+                && pull.base_ref == repository.default_branch
                 && arguments[threadlane_core::forge::EXPECTED_HEAD].as_str()
                     == Some(pull.head_sha.as_str())
                 && db

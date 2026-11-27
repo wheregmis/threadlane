@@ -135,6 +135,10 @@ pub struct PullRequestState {
     /// from the pull request's for a fork.
     pub head_repository: String,
     pub head_ref: String,
+    /// The branch it merges into. A task review covers the head against the
+    /// repository's default branch, so only a merge into that branch can
+    /// rest on one (#788).
+    pub base_ref: String,
     /// The head commit's full SHA.
     pub head_sha: String,
     pub draft: bool,
