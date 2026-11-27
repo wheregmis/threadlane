@@ -687,8 +687,11 @@ mod paste_tests {
         let composer = Fixture::new(cx, "paste-cursors", "a\nb");
         let add_cursor = if cfg!(target_os = "macos") {
             "cmd-alt-up"
-        } else {
+        } else if cfg!(target_os = "windows") {
             "ctrl-alt-up"
+        } else {
+            // Linux avoids Ctrl+Alt+arrows, which desktops may reserve.
+            "shift-alt-up"
         };
         composer.press(cx, add_cursor);
         let missing = composer.missing();
