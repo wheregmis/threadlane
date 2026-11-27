@@ -64,6 +64,9 @@ pub const GITHUB_CLI: &str = "github_cli";
 pub const ASSIGN_ISSUE: &str = "assign_issue";
 /// Replace the title and/or body of a registered repository's pull request.
 pub const EDIT_PULL_REQUEST: &str = "edit_pull_request";
+/// Change the base branch an open pull request of a registered repository
+/// merges into (#788).
+pub const RETARGET_PULL_REQUEST: &str = "retarget_pull_request";
 /// Reply to and resolve one review thread of a pull request, naming the fixing commit
 /// or why its finding was declined.
 pub const RESOLVE_REVIEW_THREAD: &str = "resolve_review_thread";
@@ -146,6 +149,11 @@ pub enum RepositoryAction {
         number: std::num::NonZeroU64,
         title: Option<String>,
         body: Option<String>,
+    },
+    /// Change the numbered open pull request's base branch to `base`.
+    RetargetPullRequest {
+        number: std::num::NonZeroU64,
+        base: String,
     },
     /// Add and remove labels on the numbered issue. Labels the repository
     /// does not have are reported, never created.

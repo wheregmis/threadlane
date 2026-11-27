@@ -941,6 +941,7 @@ fn widgets_pull(branch: &str, head: &str, check: &str) -> PullRequestState {
     PullRequestState {
         head_repository: "acme/widgets".into(),
         head_ref: branch.into(),
+        base_ref: "main".into(),
         head_sha: head.into(),
         draft: false,
         mergeable_state: "clean".into(),
@@ -1289,6 +1290,12 @@ async fn an_own_merge_asks_when_a_check_fails_or_another_head_was_approved() {
             mergeable_state: "dirty".into(),
             ..widgets_pull(&branch, &approved_head(), "success")
         },
+        // Retargeted off the default branch: the review covered the head
+        // against main only (#788).
+        PullRequestState {
+            base_ref: "v2".into(),
+            ..widgets_pull(&branch, &approved_head(), "success")
+        },
     ] {
         let (hub, github, lease, run) = own_merge(TaskOrigin::User, pull.clone()).await;
         let merged = call(
@@ -1620,6 +1627,15 @@ async fn the_lead_merges_only_the_reviewed_green_head_and_you_approve_it() {
             widgets_pull("threadlane/T-0001", &other, "success"),
             merge(&other),
             "no code review",
+        ),
+        (
+            "retargeted",
+            PullRequestState {
+                base_ref: "v2".into(),
+                ..widgets_pull("threadlane/T-0001", &approved_head(), "success")
+            },
+            merge(&approved_head()),
+            "not the default branch main",
         ),
     ] {
         github.set_pull_request("acme/widgets", 42, Ok(pull));

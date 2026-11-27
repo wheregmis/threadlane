@@ -132,8 +132,16 @@ impl LocalLink {
         let (verdict, new_work) = self
             .gate(&run, &lane, &definition, arguments, &events, None)
             .await?;
+        // A pull request onto a branch other than the default one is yours to
+        // decide, never a default, rule or review (#788).
+        let off_default = dream.is_none()
+            && crate::publish::names_off_default_base(db, &lane, tool, arguments).await?;
         let mut asked = match verdict {
             Verdict::Block { reason } => return Err(ToolError::Blocked(reason)),
+            _ if off_default => Some(Asked::You {
+                offers_rule: false,
+                proposal: false,
+            }),
             // The user approves each filing outside the project (#779): no
             // standing rule, default or review answers it.
             _ if tool == FILE_UPSTREAM_ISSUE => Some(Asked::You {
@@ -195,7 +203,10 @@ impl LocalLink {
         // A requested task's own step is decided again on its own-work row.
         // Read here, once the call is recorded, so a repeated call replays
         // this outcome instead of reading GitHub again.
-        if dream.is_none() && matches!(asked, Some(Asked::You { .. } | Asked::Review { .. })) {
+        if dream.is_none()
+            && !off_default
+            && matches!(asked, Some(Asked::You { .. } | Asked::Review { .. }))
+        {
             let regated = match self.own_work(&lane, tool, arguments).await {
                 Ok(Some(own)) => self
                     .gate(&run, &lane, &definition, arguments, &events, Some(own))
@@ -385,8 +396,11 @@ impl LocalLink {
             return Ok(None);
         };
         // The merge is pinned to this head, so the approval must be for it too.
+        // A task review covers the head against the default branch only, so
+        // a pull request retargeted elsewhere is merged only once you decide (#788).
         let checks_pass = tool != crate::MERGE
             || (pull.green()
+                && pull.base_ref == repository.default_branch
                 && arguments[threadlane_core::forge::EXPECTED_HEAD].as_str()
                     == Some(pull.head_sha.as_str())
                 && db
@@ -861,6 +875,7 @@ impl LocalLink {
                 | crate::RESOLVE_REVIEW_THREAD
                 | crate::REQUEST_REVIEW
                 | threadlane_core::forge::CREATE_TAG
+                | threadlane_core::forge::RETARGET_PULL_REQUEST
                 | REPORT_LIMITATION
                 | FILE_UPSTREAM_ISSUE
         ) {

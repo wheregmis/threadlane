@@ -141,6 +141,7 @@ pub fn rule_pattern(tool: &str, arguments: &Json) -> Json {
             | crate::RESOLVE_REVIEW_THREAD
             | crate::REQUEST_REVIEW
             | threadlane_core::forge::ATTACH_IMAGE
+            | threadlane_core::forge::RETARGET_PULL_REQUEST
     ) && let Some(number) = arguments["number"].as_u64()
     {
         targets.insert("number".into(), number.into());
@@ -152,6 +153,12 @@ pub fn rule_pattern(tool: &str, arguments: &Json) -> Json {
     ) && let Some(head) = arguments.get(threadlane_core::forge::EXPECTED_HEAD)
     {
         targets.insert(threadlane_core::forge::EXPECTED_HEAD.into(), head.clone());
+    }
+    // A standing retarget rule covers one pull request onto one base (#788).
+    if tool == threadlane_core::forge::RETARGET_PULL_REQUEST
+        && let Some(base) = arguments.get("base").filter(|base| base.is_string())
+    {
+        targets.insert("base".into(), base.clone());
     }
     Json::Object(targets)
 }
