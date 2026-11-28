@@ -518,6 +518,12 @@ impl LocalLink {
         } else {
             None
         };
+        let start_patches = match &task {
+            Some(task) if review.is_none() && pr_review.is_none() => {
+                db.start_patches(task.id).await.map_err(link_error)?
+            }
+            _ => Vec::new(),
+        };
         let space_lead_ask = if lane.kind == LaneKind::Lead {
             crate::space_lead::answered_ask(db, &events)
                 .await
@@ -545,6 +551,7 @@ impl LocalLink {
                 submission: review.submission,
                 revisions: review.revisions.clone(),
             }),
+            start_patches,
             events: events.iter().map(|event| event.id).collect(),
             perform,
             backend,

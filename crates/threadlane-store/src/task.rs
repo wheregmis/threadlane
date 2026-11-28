@@ -16,6 +16,7 @@ use threadlane_core::model::{
 };
 use threadlane_core::store::{StoreError, StoreResult, TaskStore, TaskUpdate};
 use threadlane_core::time::Timestamp;
+use threadlane_core::workspace::StartPatch;
 use turso::{Connection, Row};
 
 use crate::HubDb;
@@ -1238,6 +1239,43 @@ impl HubDb {
         let created = insert_task_in(tx.conn(), lease, task, ask).await?;
         tx.commit().await?;
         Ok(created)
+    }
+
+    /// [`Self::create_task_for_ask`] for a subtask whose branch starts with
+    /// `patches` (#790), stored in the same transaction, so the subtask
+    /// never runs without them. A repeated call leaves the stored ones.
+    pub async fn create_task_with_start(
+        &self,
+        lease: Option<&Lease>,
+        task: &NewTask,
+        ask: Option<EventId>,
+        patches: &[StartPatch],
+    ) -> StoreResult<Task> {
+        let tx = self.db.begin().await?;
+        let created = insert_task_in(tx.conn(), lease, task, ask).await?;
+        if !patches.is_empty() {
+            exec(
+                tx.conn(),
+                "UPDATE tasks SET start_patches = ?1 WHERE id = ?2 AND start_patches = '[]'",
+                params![json_text(patches)?, created.id.get()],
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(created)
+    }
+
+    /// The commits the task's branch starts with, handed over by the task
+    /// that created it; empty for most tasks.
+    pub async fn start_patches(&self, task: TaskId) -> StoreResult<Vec<StartPatch>> {
+        Ok(query_opt(
+            &self.db.reader()?,
+            "SELECT start_patches FROM tasks WHERE id = ?1",
+            params![task.get()],
+            |row| Cols(row).de::<Vec<StartPatch>>(0),
+        )
+        .await?
+        .unwrap_or_default())
     }
 }
 

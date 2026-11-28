@@ -28,9 +28,9 @@ use async_trait::async_trait;
 use threadlane_core::ids::{RepositoryId, TaskId};
 use threadlane_core::model::Repository;
 use threadlane_core::workspace::{
-    DiffFileStat, DiffPreview, MergeCheck, PublishPreview, ReviewCheckout, ReviewRevision,
-    WorkspaceCounts, WorkspaceError, WorkspaceRemoval, Workspaces, task_branch, valid_branch_name,
-    valid_commit_id, valid_repository_name,
+    DiffFileStat, DiffPreview, MAX_START_PATCH, MergeCheck, PublishPreview, ReviewCheckout,
+    ReviewRevision, StartPatch, WorkspaceCounts, WorkspaceError, WorkspaceRemoval, Workspaces,
+    task_branch, valid_branch_name, valid_commit_id, valid_repository_name,
 };
 use tokio::process::Command;
 use tokio::sync::{Mutex, OwnedMutexGuard};
@@ -146,10 +146,18 @@ impl GitWorkspaces {
     /// The task's worktree of `repository`, made on the task branch if it is
     /// not whole: from the branch if it exists, else from the latest
     /// default branch.
+    ///
+    /// A task branch made here starts with `start` applied (#790): on its
+    /// base when this clone has it, else on the latest default branch. The
+    /// patch is applied on a detached worktree and the branch made after, so
+    /// a patch that does not apply, or an attempt cut short, leaves no
+    /// branch, and the next attempt tries again rather than losing it. An
+    /// existing task branch is reused as it is.
     async fn worktree_of(
         &self,
         task: TaskId,
         repository: &Repository,
+        start: Option<&StartPatch>,
     ) -> Result<PathBuf, WorkspaceError> {
         let path = self.worktree(task, repository);
         if self.is_ready(task, repository) {
@@ -171,22 +179,114 @@ impl GitWorkspaces {
         )
         .await
         .is_ok();
-        let base = format!("origin/{}", repository.default_branch);
+        let mut base = format!("origin/{}", repository.default_branch);
+        let start = start.filter(|_| !exists);
+        if let Some(start) = start {
+            if !valid_commit_id(&start.base) {
+                return Err(WorkspaceError(format!(
+                    "the start patch of {} has no valid base",
+                    repository.name
+                )));
+            }
+            let commit = format!("{}^{{commit}}", start.base);
+            if git(Some(&clone), ["cat-file", "-e", commit.as_str()])
+                .await
+                .is_ok()
+            {
+                base.clone_from(&start.base);
+            }
+        }
         let mut args = vec![
             OsStr::new("worktree"),
             OsStr::new("add"),
             OsStr::new("--quiet"),
         ];
-        if !exists {
-            args.extend([OsStr::new("-b"), OsStr::new(&branch)]);
+        if exists {
+            args.extend([OsStr::new("--"), path.as_os_str(), OsStr::new(&branch)]);
+        } else if start.is_some() {
+            // The handed commits go on a detached worktree; the task branch
+            // is made only once all of them are in, so a branch that exists
+            // never lacks them, whatever stopped an earlier attempt.
+            args.extend([
+                OsStr::new("--detach"),
+                OsStr::new("--"),
+                path.as_os_str(),
+                OsStr::new(&base),
+            ]);
+        } else {
+            args.extend([
+                OsStr::new("-b"),
+                OsStr::new(&branch),
+                OsStr::new("--"),
+                path.as_os_str(),
+                OsStr::new(&base),
+            ]);
         }
-        args.extend([OsStr::new("--"), path.as_os_str()]);
-        args.push(OsStr::new(if exists { &branch } else { &base }));
         git(Some(&clone), args).await?;
+        if let Some(start) = start {
+            let started = match self.apply_start(task, repository, &path, start).await {
+                Ok(()) => git(Some(&path), ["switch", "--quiet", "-c", branch.as_str()])
+                    .await
+                    .map(drop),
+                Err(error) => Err(error),
+            };
+            if let Err(error) = started {
+                // Best effort: what is left here has no ready marker and no
+                // task branch, so the next attempt starts over.
+                let _ = git(
+                    Some(&clone),
+                    [
+                        OsStr::new("worktree"),
+                        OsStr::new("remove"),
+                        OsStr::new("--force"),
+                        OsStr::new("--"),
+                        path.as_os_str(),
+                    ],
+                )
+                .await;
+                return Err(error);
+            }
+        }
         tokio::fs::write(&marker, b"")
             .await
             .map_err(|error| io_error("marking the worktree ready", &marker, &error))?;
         Ok(path)
+    }
+
+    /// Applies `start` as commits on the detached worktree at `path`,
+    /// keeping their authors and messages.
+    async fn apply_start(
+        &self,
+        task: TaskId,
+        repository: &Repository,
+        path: &Path,
+        start: &StartPatch,
+    ) -> Result<(), WorkspaceError> {
+        let file = self
+            .task_dir(task)
+            .join(format!(".{}.start.patch", repository.name));
+        tokio::fs::write(&file, start.patch.as_bytes())
+            .await
+            .map_err(|error| io_error("writing the start patch", &file, &error))?;
+        let mut args: Vec<&OsStr> = COMMITTER.iter().map(OsStr::new).collect();
+        args.extend([
+            OsStr::new("am"),
+            OsStr::new("--quiet"),
+            OsStr::new("--3way"),
+            OsStr::new("--keep-cr"),
+            OsStr::new("--"),
+            file.as_os_str(),
+        ]);
+        let applied = git(Some(path), args).await;
+        remove_file(&file).await?;
+        if let Err(error) = applied {
+            let _ = git(Some(path), ["am", "--abort"]).await;
+            return Err(WorkspaceError(format!(
+                "the commits handed to {task} do not apply to {}: {error}",
+                repository.name
+            )));
+        }
+        Ok(())
     }
 
     /// Fetches the default branch into the repository's clone and returns
@@ -556,13 +656,130 @@ impl Workspaces for GitWorkspaces {
         task: TaskId,
         repositories: &[Repository],
     ) -> Result<Vec<PathBuf>, WorkspaceError> {
+        self.prepare_with_start(task, repositories, &[]).await
+    }
+
+    async fn prepare_with_start(
+        &self,
+        task: TaskId,
+        repositories: &[Repository],
+        start: &[StartPatch],
+    ) -> Result<Vec<PathBuf>, WorkspaceError> {
         let mut paths = Vec::with_capacity(repositories.len());
         for repository in repositories {
             check(repository)?;
             let _repo = self.lock_repository(repository.id).await;
-            paths.push(self.worktree_of(task, repository).await?);
+            let patch = start.iter().find(|patch| patch.repository == repository.id);
+            paths.push(self.worktree_of(task, repository, patch).await?);
         }
         Ok(paths)
+    }
+
+    async fn start_patch(
+        &self,
+        task: TaskId,
+        repository: &Repository,
+        revision: &str,
+    ) -> Result<StartPatch, WorkspaceError> {
+        check(repository)?;
+        if revision.is_empty() || revision.starts_with('-') {
+            return Err(WorkspaceError(format!(
+                "{revision:?} is not a commit or branch"
+            )));
+        }
+        let _repo = self.lock_repository(repository.id).await;
+        if !self.is_ready(task, repository) {
+            return Err(WorkspaceError(format!(
+                "{task} has no worktree of {}",
+                repository.name
+            )));
+        }
+        let path = self.worktree(task, repository);
+        let commit = format!("{revision}^{{commit}}");
+        let head = git(
+            Some(&path),
+            [
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "--end-of-options",
+                commit.as_str(),
+            ],
+        )
+        .await
+        .map_err(|_| {
+            WorkspaceError(format!(
+                "{revision:?} is not a commit or branch in your worktree of {}",
+                repository.name
+            ))
+        })?;
+        let head = head.trim().to_owned();
+        let default = format!("origin/{}", repository.default_branch);
+        let base = git(Some(&path), ["merge-base", default.as_str(), head.as_str()]).await?;
+        let base = base.trim().to_owned();
+        let range = format!("{base}..{head}");
+        if base == head {
+            return Err(WorkspaceError(format!(
+                "{revision:?} has no commits beyond {default} in {}",
+                repository.name
+            )));
+        }
+        let merges = git(Some(&path), ["rev-list", "--merges", range.as_str()]).await?;
+        if !merges.trim().is_empty() {
+            return Err(WorkspaceError(format!(
+                "{revision:?} has merge commits since it left {default}; hand over a branch \
+                 of plain commits on {default}"
+            )));
+        }
+        let args: Vec<OsString> = [
+            "format-patch",
+            "--stdout",
+            "--binary",
+            "--full-index",
+            "--no-signature",
+            range.as_str(),
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        let command = git_command(Some(&path), &args);
+        let too_large = || {
+            WorkspaceError(format!(
+                "the commits of {revision:?} are more than {MAX_START_PATCH} bytes; at most \
+                 {MAX_START_PATCH} can be handed over"
+            ))
+        };
+        let output = bounded_output(command, MAX_START_PATCH, GIT_TIMEOUT)
+            .await
+            .map_err(|error| match error {
+                BoundedError::Io(error) => {
+                    WorkspaceError(format!("could not run git format-patch: {error}"))
+                }
+                BoundedError::TimedOut => WorkspaceError(timed_out("git", &args, GIT_TIMEOUT)),
+                BoundedError::TooLarge => too_large(),
+            })?;
+        if !output.status.success() {
+            return Err(WorkspaceError(format!(
+                "git format-patch failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        // A lossy conversion would change the commits; binary files come
+        // out as text, so only text in another encoding is refused.
+        let patch = String::from_utf8(output.stdout).map_err(|_| {
+            WorkspaceError(format!(
+                "the commits of {revision:?} change text that is not UTF-8, which cannot be handed over"
+            ))
+        })?;
+        if patch.len() > MAX_START_PATCH {
+            return Err(too_large());
+        }
+        Ok(StartPatch {
+            repository: repository.id,
+            base,
+            patch,
+        })
     }
 
     async fn verify_submission(
@@ -1363,6 +1580,100 @@ pub(crate) async fn run(
     ))
 }
 
+/// The most of a command's standard error [`bounded_output`] keeps; the rest
+/// is read and dropped so the command never blocks on it.
+const MAX_STDERR: u64 = 64 * 1024;
+
+/// What a command run by [`bounded_output`] printed, and how it ended.
+#[derive(Debug)]
+struct BoundedOutput {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// Why [`bounded_output`] has no output to give.
+#[derive(Debug)]
+enum BoundedError {
+    /// The command could not be started or read.
+    Io(io::Error),
+    /// The command ran out of time; it was killed and reaped.
+    TimedOut,
+    /// The command printed more than the limit; it was killed and reaped.
+    TooLarge,
+}
+
+/// Runs a prepared command with no input like [`Command::output`], but
+/// holds at most `limit` bytes of its standard output and [`MAX_STDERR`] of
+/// its standard error (#790). A command that prints more than `limit`, or
+/// runs past `timeout`, is killed and reaped rather than read to the end.
+async fn bounded_output(
+    mut command: Command,
+    limit: usize,
+    timeout: Duration,
+) -> Result<BoundedOutput, BoundedError> {
+    use tokio::io::AsyncReadExt;
+    let deadline = tokio::time::Instant::now() + timeout;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command.spawn().map_err(BoundedError::Io)?;
+    let (Some(stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        let _ = child.kill().await;
+        return Err(BoundedError::Io(io::Error::other(
+            "the output was not piped",
+        )));
+    };
+    // Standard error is drained beside standard output, so a command that
+    // fills one pipe while the other is read never stalls.
+    let mut errors = tokio::spawn(async move {
+        let mut kept = Vec::new();
+        (&mut stderr)
+            .take(MAX_STDERR)
+            .read_to_end(&mut kept)
+            .await?;
+        tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await?;
+        Ok::<_, io::Error>(kept)
+    });
+    let cap = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
+    let mut out = Vec::new();
+    let read = tokio::time::timeout_at(deadline, stdout.take(cap).read_to_end(&mut out)).await;
+    let stop = match read {
+        Err(_) => Some(BoundedError::TimedOut),
+        Ok(Err(error)) => Some(BoundedError::Io(error)),
+        Ok(Ok(_)) if out.len() > limit => Some(BoundedError::TooLarge),
+        Ok(Ok(_)) => None,
+    };
+    if let Some(error) = stop {
+        // `kill` also waits, so no zombie is left behind.
+        let _ = child.kill().await;
+        errors.abort();
+        return Err(error);
+    }
+    let Ok(status) = tokio::time::timeout_at(deadline, child.wait()).await else {
+        let _ = child.kill().await;
+        errors.abort();
+        return Err(BoundedError::TimedOut);
+    };
+    let status = status.map_err(BoundedError::Io)?;
+    let stderr = match tokio::time::timeout_at(deadline, &mut errors).await {
+        Ok(Ok(Ok(kept))) => kept,
+        Ok(Ok(Err(error))) => return Err(BoundedError::Io(error)),
+        Ok(Err(error)) => return Err(BoundedError::Io(io::Error::other(error))),
+        Err(_) => {
+            errors.abort();
+            return Err(BoundedError::TimedOut);
+        }
+    };
+    Ok(BoundedOutput {
+        status,
+        stdout: out,
+        stderr,
+    })
+}
+
 /// The error [`run`] returns when `program` with `args` runs out of `timeout`.
 pub(crate) fn timed_out(program: &str, args: &[OsString], timeout: Duration) -> String {
     format!("{program} {} timed out after {timeout:?}", shown(args))
@@ -1463,6 +1774,46 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    /// #790: endless output is cut off at the limit and the command is
+    /// killed, instead of being read to the end.
+    #[tokio::test]
+    async fn bounded_output_kills_a_command_that_prints_too_much() {
+        let error = bounded_output(Command::new("yes"), 1024, Duration::from_secs(30))
+            .await
+            .expect_err("too large");
+        assert!(matches!(error, BoundedError::TooLarge), "{error:?}");
+
+        let mut exact = Command::new("printf");
+        exact.arg("12345");
+        let output = bounded_output(exact, 5, Duration::from_secs(30))
+            .await
+            .expect("at the limit");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"12345");
+    }
+
+    #[tokio::test]
+    async fn bounded_output_keeps_only_the_start_of_standard_error() {
+        let mut noisy = Command::new("sh");
+        noisy.args(["-c", "head -c 1000000 /dev/zero >&2; printf done; exit 3"]);
+        let output = bounded_output(noisy, 1024, Duration::from_secs(30))
+            .await
+            .expect("output");
+        assert_eq!(output.status.code(), Some(3));
+        assert_eq!(output.stdout, b"done");
+        assert_eq!(output.stderr.len() as u64, MAX_STDERR);
+    }
+
+    #[tokio::test]
+    async fn bounded_output_kills_a_command_that_runs_too_long() {
+        let mut slow = Command::new("sleep");
+        slow.arg("30");
+        let error = bounded_output(slow, 1024, Duration::from_millis(200))
+            .await
+            .expect_err("timed out");
+        assert!(matches!(error, BoundedError::TimedOut), "{error:?}");
     }
 
     #[test]

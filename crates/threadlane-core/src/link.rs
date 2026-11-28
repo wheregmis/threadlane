@@ -46,6 +46,15 @@ pub const DIFF_PREVIEW: &str = "diff_preview";
 /// The preview, when present, is built from this commit.
 pub const PUBLISH_REVISION: &str = "publish_revision";
 
+/// The `create_task` argument naming, per repository, a commit or branch in
+/// the creating task's worktree that the subtask's branch starts with (#790).
+pub const START_FROM: &str = "start_from";
+
+/// The field of a `create_task` call the runner sets to the
+/// [`crate::workspace::StartPatch`]es it made from [`START_FROM`]. An
+/// agent's own value is removed.
+pub const START_PATCHES: &str = "start_patches";
+
 /// Everything a runner needs to execute one run. Built by the hub.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunAssignment {
@@ -76,6 +85,10 @@ pub struct RunAssignment {
     /// A standalone PR review works in a separate checkout and finishes as a normal task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_review: Option<PullRequestReview>,
+    /// Commits the task's branch starts with when its worktree is first
+    /// made, handed over by the task that created it (#790).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub start_patches: Vec<crate::workspace::StartPatch>,
     /// The events this run consumes.
     pub events: Vec<EventId>,
     /// Decisions answered with approval among those events: the runner

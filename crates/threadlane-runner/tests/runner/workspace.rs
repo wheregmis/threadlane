@@ -1062,3 +1062,321 @@ async fn an_ended_tasks_worktrees_go_only_once_nothing_in_them_would_be_lost() {
         );
     }
 }
+
+/// #790: a task commits a separate finding on a side branch and hands it to
+/// a subtask, whose branch starts from the default branch with just those
+/// commits, authors and messages kept, applied once.
+#[tokio::test]
+async fn a_side_branch_handed_to_a_subtask_starts_its_branch() {
+    let s = setup();
+    let path = s.prepare(T1).await;
+    git(&path, &["switch", "--quiet", "-c", "finding-2"]);
+    std::fs::write(path.join("finding.txt"), "second finding\n").unwrap();
+    git(&path, &["add", "finding.txt"]);
+    git(
+        &path,
+        &[
+            "-c",
+            "user.name=Finder",
+            "-c",
+            "user.email=finder@localhost",
+            "commit",
+            "--quiet",
+            "-m",
+            "Second finding",
+        ],
+    );
+    git(&path, &["switch", "--quiet", "threadlane/T-0001"]);
+    std::fs::write(path.join("first.txt"), "first finding\n").unwrap();
+    s.checkpoint(T1).await;
+
+    let patch = s
+        .workspaces
+        .start_patch(T1, &s.repository, "finding-2")
+        .await
+        .expect("patch");
+    assert_eq!(patch.repository, s.repository.id);
+    let main = git(&path, &["rev-parse", "origin/main"]);
+    assert_eq!(patch.base, main.trim(), "where finding-2 leaves main");
+
+    // A later change on main is brought in at run start, not here.
+    s.land_on_main("other.txt", "elsewhere");
+    let repositories = std::slice::from_ref(&s.repository);
+    let start = std::slice::from_ref(&patch);
+    let child = s
+        .workspaces
+        .prepare_with_start(T2, repositories, start)
+        .await
+        .expect("prepare the subtask")
+        .remove(0);
+    assert_eq!(branch(&child), "threadlane/T-0002");
+    assert_eq!(
+        std::fs::read_to_string(child.join("finding.txt")).unwrap(),
+        "second finding\n"
+    );
+    assert!(!child.join("first.txt").exists(), "only the handed commits");
+    assert_eq!(commits(&child), 2);
+    let last = git(&child, &["log", "-1", "--format=%an <%ae>|%s"]);
+    assert_eq!(last.trim(), "Finder <finder@localhost>|Second finding");
+    assert_eq!(git(&child, &["status", "--porcelain"]), "");
+
+    let again = s
+        .workspaces
+        .prepare_with_start(T2, repositories, start)
+        .await
+        .expect("prepare again")
+        .remove(0);
+    assert_eq!(again, child);
+    assert_eq!(commits(&child), 2, "applied once");
+}
+
+#[tokio::test]
+async fn a_hand_off_with_nothing_to_hand_over_or_an_odd_name_is_refused() {
+    let s = setup();
+    let path = s.prepare(T1).await;
+    for (revision, says) in [
+        ("HEAD", "no commits beyond origin/main"),
+        ("no-such-branch", "is not a commit or branch"),
+        ("--output=x", "is not a commit or branch"),
+        ("", "is not a commit or branch"),
+    ] {
+        let error = s
+            .workspaces
+            .start_patch(T1, &s.repository, revision)
+            .await
+            .expect_err(revision);
+        assert!(error.0.contains(says), "{revision}: {error}");
+    }
+    let error = s
+        .workspaces
+        .start_patch(T2, &s.repository, "HEAD")
+        .await
+        .expect_err("no worktree");
+    assert!(error.0.contains("has no worktree"), "{error}");
+
+    // A merge since leaving main would be lost by format-patch.
+    git(&path, &["switch", "--quiet", "-c", "side"]);
+    std::fs::write(path.join("a.txt"), "a").unwrap();
+    git(&path, &["add", "a.txt"]);
+    git(&path, &["commit", "--quiet", "-m", "A"]);
+    git(&path, &["switch", "--quiet", "threadlane/T-0001"]);
+    std::fs::write(path.join("b.txt"), "b").unwrap();
+    git(&path, &["add", "b.txt"]);
+    git(&path, &["commit", "--quiet", "-m", "B"]);
+    git(&path, &["merge", "--quiet", "--no-edit", "side"]);
+    let error = s
+        .workspaces
+        .start_patch(T1, &s.repository, "HEAD")
+        .await
+        .expect_err("merges");
+    assert!(error.0.contains("merge commits"), "{error}");
+}
+
+/// A patch made on another machine has a base this clone lacks: it goes on
+/// the latest main, and when it does not apply the subtask gets no branch,
+/// so the next attempt tries again instead of starting without it.
+#[tokio::test]
+async fn a_hand_off_that_does_not_apply_leaves_no_branch() {
+    let s = setup();
+    let path = s.prepare(T1).await;
+    std::fs::write(path.join("README.md"), "# app, by the finding\n").unwrap();
+    s.checkpoint(T1).await;
+    let mut patch = s
+        .workspaces
+        .start_patch(T1, &s.repository, "HEAD")
+        .await
+        .expect("patch");
+    patch.base = "0".repeat(40);
+    s.land_on_main("README.md", "# app, by another task\n");
+
+    let error = s
+        .workspaces
+        .prepare_with_start(
+            T2,
+            std::slice::from_ref(&s.repository),
+            std::slice::from_ref(&patch),
+        )
+        .await
+        .expect_err("conflicts");
+    assert!(error.0.contains("do not apply"), "{error}");
+    let clone = s.clones().join(s.repository.id.to_string());
+    let branches = git(&clone, &["branch", "--list", "threadlane/T-0002"]);
+    assert_eq!(branches.trim(), "", "no branch without the patch");
+
+    // Without the conflict, the same patch goes on the latest main.
+    s.land_on_main("README.md", "# app\n");
+    let child = s
+        .workspaces
+        .prepare_with_start(
+            T2,
+            std::slice::from_ref(&s.repository),
+            std::slice::from_ref(&patch),
+        )
+        .await
+        .expect("applies")
+        .remove(0);
+    assert_eq!(
+        std::fs::read_to_string(child.join("README.md")).unwrap(),
+        "# app, by the finding\n"
+    );
+}
+
+/// #790: commits larger than a start patch may be are refused, and git is
+/// not read past the limit to find that out.
+#[tokio::test]
+async fn a_hand_off_too_large_to_send_is_refused() {
+    let s = setup();
+    let path = s.prepare(T1).await;
+    let line = "a finding that takes a lot of room to describe\n";
+    std::fs::write(path.join("big.txt"), line.repeat(30_000)).unwrap();
+    s.checkpoint(T1).await;
+    let error = s
+        .workspaces
+        .start_patch(T1, &s.repository, "HEAD")
+        .await
+        .expect_err("too large");
+    assert!(error.0.contains("can be handed over"), "{error}");
+}
+
+/// #790: the handed commits go on a detached worktree and the task branch
+/// is made only once all of them are in. An attempt that stops partway
+/// leaves no branch, so the next one applies the whole patch again.
+#[tokio::test]
+async fn a_hand_off_cut_short_leaves_no_branch_and_is_applied_again() {
+    let s = setup();
+    let path = s.prepare(T1).await;
+    for (file, message) in [("one.txt", "First"), ("two.txt", "Second")] {
+        std::fs::write(path.join(file), message).unwrap();
+        git(&path, &["add", file]);
+        git(&path, &["commit", "--quiet", "-m", message]);
+    }
+    let patch = s
+        .workspaces
+        .start_patch(T1, &s.repository, "HEAD")
+        .await
+        .expect("patch");
+
+    // The hook runs before each commit `git am` makes: it records whether
+    // the task branch exists yet, and stops at the second commit (once it is applied, before it is committed) while
+    // `stop` is there.
+    let clone = s.clones().join(s.repository.id.to_string());
+    let seen = s.dir.path().join("seen");
+    let stop = s.dir.path().join("stop");
+    std::fs::write(&stop, "").unwrap();
+    let hooks = clone.join(".git/hooks");
+    // A hooks path set for this machine's user would hide the clone's hooks.
+    git(
+        &clone,
+        &["config", "core.hooksPath", hooks.to_str().unwrap()],
+    );
+    let hook = hooks.join("pre-applypatch");
+    threadlane_testkit::script::write_executable(
+        &hook,
+        &format!(
+            "#!/bin/sh\n\
+             if git rev-parse --verify --quiet refs/heads/threadlane/T-0002 >/dev/null; \
+             then echo branch >> '{seen}'; else echo none >> '{seen}'; fi\n\
+             if [ -e '{stop}' ] && [ -e two.txt ]; then exit 1; fi\n",
+            seen = seen.display(),
+            stop = stop.display(),
+        ),
+    );
+    let repositories = std::slice::from_ref(&s.repository);
+    let start = std::slice::from_ref(&patch);
+    s.workspaces
+        .prepare_with_start(T2, repositories, start)
+        .await
+        .expect_err("stopped partway");
+    let branches = git(&clone, &["branch", "--list", "threadlane/T-0002"]);
+    assert_eq!(branches.trim(), "", "no half-applied branch");
+
+    std::fs::remove_file(&stop).unwrap();
+    let child = s
+        .workspaces
+        .prepare_with_start(T2, repositories, start)
+        .await
+        .expect("applies")
+        .remove(0);
+    assert_eq!(branch(&child), "threadlane/T-0002");
+    assert!(child.join("one.txt").exists() && child.join("two.txt").exists());
+    assert_eq!(commits(&child), 3);
+    let seen = std::fs::read_to_string(&seen).unwrap();
+    assert!(
+        seen.lines().all(|line| line == "none"),
+        "the branch exists only after the whole patch: {seen}"
+    );
+    assert_eq!(seen.lines().count(), 4, "two commits each attempt: {seen}");
+
+    // An existing task branch is reused without applying again.
+    std::fs::remove_file(&hook).unwrap();
+    let ready = s.dir.path().join("workspaces/worktrees/T-0002/.app.ready");
+    std::fs::remove_file(&ready).unwrap();
+    let again = s
+        .workspaces
+        .prepare_with_start(T2, repositories, start)
+        .await
+        .expect("reused")
+        .remove(0);
+    assert_eq!(commits(&again), 3, "applied once");
+}
+
+/// #790: the runner turns a task's `start_from` into start patches from its
+/// worktree before the hub sees the call, replacing any the agent wrote.
+#[tokio::test]
+async fn a_tasks_create_task_carries_the_commits_it_hands_over() {
+    let h = Harness::new();
+    let s = setup();
+    let root = h.config.lanes_dir.parent().unwrap().join("workspaces");
+    let workspaces = GitWorkspaces::new(root);
+    let repositories = std::slice::from_ref(&s.repository);
+    let path = workspaces.prepare(T1, repositories).await.expect("prepare")[0].clone();
+    git(&path, &["switch", "--quiet", "-c", "finding-2"]);
+    std::fs::write(path.join("finding.txt"), "second finding\n").unwrap();
+    git(&path, &["add", "finding.txt"]);
+    git(&path, &["commit", "--quiet", "-m", "Second finding"]);
+    git(&path, &["switch", "--quiet", "threadlane/T-0001"]);
+
+    let mut assignment = assignment(11);
+    assignment.lane_kind = LaneKind::Task;
+    assignment.task_id = Some(T1);
+    assignment.repositories = vec![s.repository.clone()];
+    h.link.grant(lease(LANE));
+    h.link.push_begin(Ok(run(assignment)));
+    h.link.push_tool(Ok(json!({ "task_id": "T-0002" })));
+    h.link.push_tool(Ok(json!({PROGRESS_WRITTEN: true})));
+    h.backend.scripted.push(
+        Script::new()
+            .call(
+                "sub",
+                "create_task",
+                json!({
+                    "title": "second finding",
+                    "goal": "its own PR",
+                    "start_from": { "app": "finding-2" },
+                    "start_patches": "from the agent",
+                }),
+            )
+            .call("progress", "memory_create", json!({}))
+            .finish("Handed over"),
+    );
+    h.runner.work_once().await.unwrap();
+    let forwarded = h
+        .calls()
+        .into_iter()
+        .find_map(|call| match call {
+            Call::Tool {
+                tool, arguments, ..
+            } if tool == "create_task" => Some(arguments),
+            _ => None,
+        })
+        .expect("create_task reached the hub");
+    let patches = forwarded["start_patches"].as_array().expect("patches");
+    assert_eq!(patches.len(), 1, "{forwarded}");
+    assert_eq!(patches[0]["repository"], json!(s.repository.id));
+    let patch = patches[0]["patch"].as_str().unwrap();
+    assert!(
+        patch.contains("Subject: [PATCH] Second finding") && patch.contains("+second finding"),
+        "{patch}"
+    );
+    assert_eq!(forwarded["start_from"], json!({ "app": "finding-2" }));
+}

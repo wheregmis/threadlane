@@ -42,6 +42,7 @@ fn main() {
         repositories: vec![],
         review: None,
         pr_review: None,
+        start_patches: Vec::new(),
         events: (1..=32).map(EventId).collect(),
         perform: vec![],
         backend: BackendKind::Codex,
