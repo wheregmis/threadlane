@@ -1221,6 +1221,105 @@ async fn a_hand_off_that_does_not_apply_leaves_no_branch() {
     );
 }
 
+/// #790: commits larger than a start patch may be are refused, and git is
+/// not read past the limit to find that out.
+#[tokio::test]
+async fn a_hand_off_too_large_to_send_is_refused() {
+    let s = setup();
+    let path = s.prepare(T1).await;
+    let line = "a finding that takes a lot of room to describe\n";
+    std::fs::write(path.join("big.txt"), line.repeat(30_000)).unwrap();
+    s.checkpoint(T1).await;
+    let error = s
+        .workspaces
+        .start_patch(T1, &s.repository, "HEAD")
+        .await
+        .expect_err("too large");
+    assert!(error.0.contains("can be handed over"), "{error}");
+}
+
+/// #790: the handed commits go on a detached worktree and the task branch
+/// is made only once all of them are in. An attempt that stops partway
+/// leaves no branch, so the next one applies the whole patch again.
+#[tokio::test]
+async fn a_hand_off_cut_short_leaves_no_branch_and_is_applied_again() {
+    let s = setup();
+    let path = s.prepare(T1).await;
+    for (file, message) in [("one.txt", "First"), ("two.txt", "Second")] {
+        std::fs::write(path.join(file), message).unwrap();
+        git(&path, &["add", file]);
+        git(&path, &["commit", "--quiet", "-m", message]);
+    }
+    let patch = s
+        .workspaces
+        .start_patch(T1, &s.repository, "HEAD")
+        .await
+        .expect("patch");
+
+    // The hook runs before each commit `git am` makes: it records whether
+    // the task branch exists yet, and stops at the second commit (once it is applied, before it is committed) while
+    // `stop` is there.
+    let clone = s.clones().join(s.repository.id.to_string());
+    let seen = s.dir.path().join("seen");
+    let stop = s.dir.path().join("stop");
+    std::fs::write(&stop, "").unwrap();
+    let hooks = clone.join(".git/hooks");
+    // A hooks path set for this machine's user would hide the clone's hooks.
+    git(
+        &clone,
+        &["config", "core.hooksPath", hooks.to_str().unwrap()],
+    );
+    let hook = hooks.join("pre-applypatch");
+    threadlane_testkit::script::write_executable(
+        &hook,
+        &format!(
+            "#!/bin/sh\n\
+             if git rev-parse --verify --quiet refs/heads/threadlane/T-0002 >/dev/null; \
+             then echo branch >> '{seen}'; else echo none >> '{seen}'; fi\n\
+             if [ -e '{stop}' ] && [ -e two.txt ]; then exit 1; fi\n",
+            seen = seen.display(),
+            stop = stop.display(),
+        ),
+    );
+    let repositories = std::slice::from_ref(&s.repository);
+    let start = std::slice::from_ref(&patch);
+    s.workspaces
+        .prepare_with_start(T2, repositories, start)
+        .await
+        .expect_err("stopped partway");
+    let branches = git(&clone, &["branch", "--list", "threadlane/T-0002"]);
+    assert_eq!(branches.trim(), "", "no half-applied branch");
+
+    std::fs::remove_file(&stop).unwrap();
+    let child = s
+        .workspaces
+        .prepare_with_start(T2, repositories, start)
+        .await
+        .expect("applies")
+        .remove(0);
+    assert_eq!(branch(&child), "threadlane/T-0002");
+    assert!(child.join("one.txt").exists() && child.join("two.txt").exists());
+    assert_eq!(commits(&child), 3);
+    let seen = std::fs::read_to_string(&seen).unwrap();
+    assert!(
+        seen.lines().all(|line| line == "none"),
+        "the branch exists only after the whole patch: {seen}"
+    );
+    assert_eq!(seen.lines().count(), 4, "two commits each attempt: {seen}");
+
+    // An existing task branch is reused without applying again.
+    std::fs::remove_file(&hook).unwrap();
+    let ready = s.dir.path().join("workspaces/worktrees/T-0002/.app.ready");
+    std::fs::remove_file(&ready).unwrap();
+    let again = s
+        .workspaces
+        .prepare_with_start(T2, repositories, start)
+        .await
+        .expect("reused")
+        .remove(0);
+    assert_eq!(commits(&again), 3, "applied once");
+}
+
 /// #790: the runner turns a task's `start_from` into start patches from its
 /// worktree before the hub sees the call, replacing any the agent wrote.
 #[tokio::test]
